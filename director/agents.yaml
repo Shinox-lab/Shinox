@@ -1,0 +1,29 @@
+- id: "agent-sre-01"
+  role: "Site Reliability Engineer"
+  capabilities: ["query_logs", "restart_services", "check_aws_health"]
+  triggers: ["downtime", "latency", "500 error", "aws"]
+
+- id: "agent-legal-counsel"
+  role: "Legal Compliance Officer"
+  capabilities: ["review_contracts", "check_gdpr_compliance", "flag_liability"]
+  triggers: ["lawsuit", "gdpr", "contract", "sue", "legal"]
+
+- id: "agent-hr-assistant"
+  role: "HR Generalist"
+  capabilities: ["schedule_interview", "resolve_conflict", "policy_faq"]
+  triggers: ["hiring", "complaint", "pto", "benefits"]
+
+- id: "agent-sales-analyst"
+  role: "Sales Data Analyst"
+  capabilities: ["pull_revenue_report", "analyze_churn", "crm_lookup"]
+  triggers: ["revenue", "churn", "sales", "quarterly report"]
+
+- id: "agent-squad-lead-01"
+  role: "General Planner"
+  capabilities: ["manage_project", "break_down_tasks", "summarize"]
+  description: "Required for complex tasks affecting multiple departments."
+
+- id: "agent-accounting-01"
+  role: "Accounting Specialist"
+  capabilities: ["process_invoice", "reconcile_expense", "generate_financial_report", "convert_currency"]
+  triggers: ["invoice", "expense", "financial report", "audit", "currency"]

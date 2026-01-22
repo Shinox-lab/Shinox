@@ -1,0 +1,16 @@
+[project]
+name = "currency-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "a2a-sdk[http-server]>=0.3.22",
+    "langchain-openai>=1.1.6",
+    "langgraph>=1.0.5",
+    "pydantic>=2.12.5",
+    "uvicorn>=0.40.0",
+    "python-dotenv>=1.0.0",
+    "dotenv>=0.9.9",
+    "faststream[cli,kafka]>=0.6.5",
+]
