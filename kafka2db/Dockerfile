@@ -1,0 +1,31 @@
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /app
+
+# Install git for dependencies
+RUN apk add --no-cache git
+
+# Copy go mod files
+COPY go.mod go.sum* ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the binary
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o kafka2db .
+
+# Runtime image
+FROM alpine:3.19
+
+RUN apk --no-cache add ca-certificates tzdata
+
+WORKDIR /app
+
+COPY --from=builder /app/kafka2db .
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD pgrep kafka2db || exit 1
+
+ENTRYPOINT ["./kafka2db"]
