@@ -23,6 +23,8 @@ class SquadState(TypedDict):
     available_squad_agents: List[str]
     squad_status: Literal["IDLE", "PLANNING", "EXECUTING", "BLOCKED", "DONE", "UPDATING"]
     next_actions: List[Dict[str, str]]
+    # Track completed task results for context injection into subsequent stages
+    completed_results: Dict[str, str]  # agent_id -> result content
 
 
 # --- 2. LLM Instance ---
@@ -58,7 +60,7 @@ def node_planner(state: SquadState):
     The Strategic Thinker. Looks at history and generates/updates the DAG.
     """
     prompt = f"""
-    You are the Squad Lead.
+    You are the Squad Lead, a COORDINATOR agent.
 
     GOAL: Break down the user's request into a sequence of STAGES.
 
@@ -68,23 +70,25 @@ def node_planner(state: SquadState):
     CURRENT PLAN: {state.get('plan', [])}
     LATEST REQUEST: {state['messages'][-1].content}
 
-    INSTRUCTIONS:
-    1. Break the goal into STAGES.
-    2. Tasks in the same STAGE will run in PARALLEL.
-    3. Tasks in later stages depend on earlier stages.
-    4. Format:
-       STAGE
-       agent-id: instruction
-       agent-id: instruction
-       STAGE
-       agent-id: instruction
+    CRITICAL RULES:
+    1. You are ONLY a coordinator - NEVER assign tasks to yourself (squad-lead-agent).
+    2. Delegate ALL work to the available worker agents.
+    3. For summarizing/combining results, use generalist-simple-logic-agent.
+    4. Tasks in the same STAGE run in PARALLEL.
+    5. Tasks in later stages depend on earlier stages.
+
+    FORMAT:
+    STAGE
+    agent-id: instruction
+    agent-id: instruction
+    STAGE
+    agent-id: instruction
 
     Example Output:
     STAGE
-    agent-accounting-01: Convert 1000 USD to MYR
-    agent-reporter-01: Summarize the transaction
+    accounting-specialist-agent: Convert 1000 USD to MYR
     STAGE
-    agent-auditor-01: Audit the report
+    generalist-simple-logic-agent: Summarize the conversion result for the user
     """
 
     response = llm.invoke([SystemMessage(content=prompt)])
@@ -116,9 +120,11 @@ def node_planner(state: SquadState):
 def node_executor(state: SquadState):
     """
     The Doer. Takes the next tasks from the plan and prepares the commands.
+    Injects context from completed results into subsequent stage instructions.
     """
     plan = state.get('plan', [])
     assignments = state.get('assignments', {})
+    completed_results = state.get('completed_results', {})
 
     if not plan:
         return {"next_actions": [], "squad_status": "DONE"}
@@ -127,15 +133,30 @@ def node_executor(state: SquadState):
     new_actions = []
     new_assignments = assignments.copy()
 
+    # Build context from completed results if any exist
+    context_block = ""
+    if completed_results:
+        context_lines = ["## Previous Results from Squad Members:\n"]
+        for agent_id, result in completed_results.items():
+            # Truncate very long results to avoid token explosion
+            truncated = result[:2000] + "..." if len(result) > 2000 else result
+            context_lines.append(f"### {agent_id}:\n{truncated}\n")
+        context_block = "\n".join(context_lines) + "\n---\n\n"
+
     for task in current_stage:
         if ":" in task:
             target_id, instruction = task.split(":", 1)
             target_id = target_id.strip()
 
             if target_id not in assignments:
+                # Inject context for tasks that likely need it (summarize, combine, etc.)
+                final_instruction = instruction.strip()
+                if context_block:
+                    final_instruction = f"{context_block}**Your Task:** {final_instruction}"
+
                 new_actions.append({
                     "target": target_id,
-                    "instruction": instruction.strip()
+                    "instruction": final_instruction
                 })
                 new_assignments[target_id] = task
 
@@ -151,19 +172,29 @@ def node_executor(state: SquadState):
 def node_updater(state: SquadState):
     """
     Updates the state after task execution (removes the finished task).
+    Also stores completed results for context injection into subsequent stages.
     """
     last_msg = state['messages'][-1]
     source_agent = last_msg.name
+    result_content = str(last_msg.content)
 
     assignments = state.get('assignments', {}).copy()
     plan = state.get('plan', [])
+    completed_results = state.get('completed_results', {}).copy()
+
+    # Store the completed result for context injection
+    completed_results[source_agent] = result_content
 
     # Remove from assignments
     if source_agent in assignments:
         del assignments[source_agent]
 
     # Remove from plan
-    result = {"assignments": assignments, "squad_status": "EXECUTING"}
+    result = {
+        "assignments": assignments,
+        "squad_status": "EXECUTING",
+        "completed_results": completed_results
+    }
 
     if plan:
         current_stage = plan[0]
