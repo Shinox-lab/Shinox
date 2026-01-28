@@ -5,6 +5,7 @@ The ShinoxAgent class provides core infrastructure for building agents
 in the Shinox mesh network.
 """
 
+import asyncio
 import os
 import json
 import logging
@@ -22,6 +23,9 @@ except ImportError:
     AgentCard = Any  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+# Heartbeat configuration
+HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("AGENT_HEARTBEAT_INTERVAL", "10"))
 
 
 class ShinoxAgent:
@@ -89,6 +93,9 @@ class ShinoxAgent:
         self.agent_id = self._generate_agent_id()
         self.self_introduction = self._generate_introduction()
 
+        # --- Heartbeat Task ---
+        self._heartbeat_task: Optional[asyncio.Task] = None
+
         # --- Broker Setup ---
         self.broker = KafkaBroker(self.broker_url)
         self.app = FastStream(self.broker)
@@ -131,11 +138,26 @@ description: "{self.agent_card.description}"
         """Internal startup hook."""
         logger.info(f"[{self.agent_id}] Starting up...")
         await self.register_with_registry()
+
+        # Start heartbeat background task
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        logger.info(f"[{self.agent_id}] Heartbeat started (interval: {HEARTBEAT_INTERVAL_SECONDS}s)")
+
         logger.info(f"[{self.agent_id}] Ready and listening for messages")
 
     async def _shutdown(self):
         """Internal shutdown hook."""
         logger.info(f"[{self.agent_id}] Shutting down...")
+
+        # Cancel heartbeat task
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            logger.info(f"[{self.agent_id}] Heartbeat stopped")
+
         await self.deregister_from_registry()
 
     async def register_with_registry(self):
@@ -173,6 +195,27 @@ description: "{self.agent_card.description}"
                 await client.post(url, params={"status": "offline"})
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Deregistration error: {e}")
+
+    async def _heartbeat_loop(self):
+        """Background task that sends periodic heartbeats to the registry."""
+        url = f"{self.registry_url}/agent/{self.agent_id}/health"
+
+        while True:
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(url, params={"status": "active"}, timeout=5.0)
+                    if resp.status_code == 200:
+                        logger.debug(f"[{self.agent_id}] Heartbeat sent")
+                    else:
+                        logger.warning(f"[{self.agent_id}] Heartbeat failed: {resp.status_code}")
+
+            except asyncio.CancelledError:
+                logger.debug(f"[{self.agent_id}] Heartbeat loop cancelled")
+                raise
+            except Exception as e:
+                logger.warning(f"[{self.agent_id}] Heartbeat error: {e}")
 
     # =========================================================================
     # MESSAGE HANDLING

@@ -184,21 +184,21 @@ func (r *Repository) InsertGroupChatMember(ctx context.Context, groupChatName st
 }
 
 // AddGroupChatMemberBySessionID adds an agent to a group_chat using the session_id (squad_name) and agent_id string
+// Note: Agent master data is managed by agent_registry service which writes full agent info to DB.
+// This function only updates status/heartbeat if agent exists, and adds the group_chat membership.
 func (r *Repository) AddGroupChatMemberBySessionID(ctx context.Context, sessionID string, agentID string, role string) error {
-	// First, ensure the agent exists in the agents table (upsert with minimal info)
+	// Update agent status and heartbeat if it exists (agent_registry manages full agent data)
 	_, err := r.pool.Exec(ctx, `
-		INSERT INTO agents (agent_id, name, status)
-		VALUES ($1, $1, 'ONLINE')
-		ON CONFLICT (agent_id) DO UPDATE SET
-			status = 'ONLINE',
-			last_heartbeat_at = NOW()
+		UPDATE agents
+		SET status = 'ONLINE', last_heartbeat_at = NOW()
+		WHERE agent_id = $1
 	`, agentID)
 	if err != nil {
-		log.Error().Err(err).Str("agent_id", agentID).Msg("Failed to upsert agent")
-		return err
+		log.Warn().Err(err).Str("agent_id", agentID).Msg("Failed to update agent status (agent may not be registered yet)")
+		// Don't return error - agent might register later, continue with membership
 	}
 
-	// Now insert the group_chat member using values directly (sessionID is squad_name PK)
+	// Insert the group_chat member using values directly (sessionID is squad_name PK)
 	_, err = r.pool.Exec(ctx, `
 		INSERT INTO group_chat_members (group_chat_name, agent_id, role, status)
 		VALUES ($1, $2, $3, 'ACTIVE')

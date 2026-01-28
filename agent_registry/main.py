@@ -7,15 +7,17 @@ Agents register themselves on startup and can query for other agents.
 This registry is itself an A2A-compliant agent that provides discovery services.
 """
 
+import asyncio
+import json
 import logging
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
-from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
 from pydantic import BaseModel, Field
+import asyncpg
 import httpx
 import os
 
@@ -23,31 +25,98 @@ import os
 REGISTRY_ID = os.getenv("REGISTRY_ID", "agent-registry-001")
 REGISTRY_URL = os.getenv("REGISTRY_URL", "http://localhost:9000")
 REGISTRY_PORT = int(os.getenv("REGISTRY_PORT", "9000"))
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://admin:adminpassword@localhost:5432/agentsquaddb")
+
+# Heartbeat configuration: mark agents as offline if no heartbeat for this many seconds
+HEARTBEAT_STALE_THRESHOLD_SECONDS = int(os.getenv("HEARTBEAT_STALE_THRESHOLD", "20"))
+HEARTBEAT_CHECK_INTERVAL_SECONDS = int(os.getenv("HEARTBEAT_CHECK_INTERVAL", "10"))
 
 logger = logging.getLogger("AgentRegistry")
 logging.basicConfig(level=logging.INFO)
 
+# --- Database Connection Pool ---
+db_pool: Optional[asyncpg.Pool] = None
+
+# --- Background Tasks ---
+_heartbeat_checker_task: Optional[asyncio.Task] = None
+
+
+async def _check_stale_agents():
+    """Background task that marks agents as offline if heartbeat is stale."""
+    while True:
+        try:
+            await asyncio.sleep(HEARTBEAT_CHECK_INTERVAL_SECONDS)
+
+            # Mark agents as offline if last_heartbeat_at is older than threshold
+            result = await db_pool.execute("""
+                UPDATE agents
+                SET status = 'offline', updated_at = NOW()
+                WHERE status = 'active'
+                  AND last_heartbeat_at < NOW() - INTERVAL '$1 seconds'
+            """.replace("$1", str(HEARTBEAT_STALE_THRESHOLD_SECONDS)))
+
+            # Log if any agents were marked offline
+            if result and result != "UPDATE 0":
+                count = int(result.split(" ")[1])
+                if count > 0:
+                    logger.info(f"Marked {count} stale agent(s) as offline (no heartbeat for >{HEARTBEAT_STALE_THRESHOLD_SECONDS}s)")
+
+        except asyncio.CancelledError:
+            logger.debug("Heartbeat checker cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Error checking stale agents: {e}")
+
+
 @asynccontextmanager
-async def lifespace(app: FastAPI):
+async def lifespan(app: FastAPI):
     """
     Lifespan context manager for startup and shutdown events.
     """
+    global db_pool, _heartbeat_checker_task
+
+    # Startup
+    logger.info(f"Connecting to database: {DATABASE_URL}")
+    db_pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=2,
+        max_size=10,
+    )
+    logger.info("Database connected")
+
+    # Start heartbeat checker background task
+    _heartbeat_checker_task = asyncio.create_task(_check_stale_agents())
+    logger.info(f"Heartbeat checker started (stale threshold: {HEARTBEAT_STALE_THRESHOLD_SECONDS}s)")
+
     await startup_event()
     yield
+
+    # Shutdown
     logger.info("Shutting down Agent Registry Service...")
+
+    # Cancel heartbeat checker
+    if _heartbeat_checker_task and not _heartbeat_checker_task.done():
+        _heartbeat_checker_task.cancel()
+        try:
+            await _heartbeat_checker_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Heartbeat checker stopped")
+
+    if db_pool:
+        await db_pool.close()
+        logger.info("Database connection closed")
+
 
 app = FastAPI(
     title="Agent Registry",
     description="A2A-compliant central registry for agent discovery",
     version="1.0.0",
-    lifespan=lifespace
+    lifespan=lifespan
 )
 
 # Setup Templates
 templates = Jinja2Templates(directory="templates")
-
-# --- In-Memory Storage (Use Redis/PostgreSQL in production) ---
-agent_registry: Dict[str, dict] = {}
 
 # --- Models ---
 
@@ -74,25 +143,43 @@ async def dashboard(request: Request):
     """
     Render the Agent Registry Dashboard.
     """
-    # Calculate stats for the dashboard
+    # Fetch agents from database
+    rows = await db_pool.fetch("""
+        SELECT agent_id, name, description, skills, kafka_inbox_topic,
+               a2a_endpoint, status, metadata, created_at, last_heartbeat_at
+        FROM agents
+        ORDER BY agent_id
+    """)
+
+    agents = []
     all_skills = set()
-    for agent in agent_registry.values():
-        all_skills.update(agent.get("skills", []))
-    
+    for row in rows:
+        skills_data = row['skills'] or {}
+        # Extract skill names from the skills JSONB
+        skill_names = list(skills_data.keys()) if isinstance(skills_data, dict) else []
+        all_skills.update(skill_names)
+
+        agents.append({
+            "agent_id": row['agent_id'],
+            "agent_name": row['name'],
+            "description": row['description'] or "",
+            "skills": skill_names,
+            "status": row['status'] or "active",
+            "registered_at": row['created_at'].isoformat() if row['created_at'] else None,
+            "last_health_check": row['last_heartbeat_at'].isoformat() if row['last_heartbeat_at'] else None,
+        })
+
     stats = {
-        "total_agents": len(agent_registry),
+        "total_agents": len(agents),
         "total_skills": len(all_skills)
     }
-    
-    # Sort agents by ID for consistent display
-    sorted_agents = sorted(agent_registry.values(), key=lambda x: x["agent_id"])
-    
+
     return templates.TemplateResponse(
-        "index.html", 
+        "index.html",
         {
-            "request": request, 
-            "stats": stats, 
-            "agents": sorted_agents,
+            "request": request,
+            "stats": stats,
+            "agents": agents,
             "Registry_ID": REGISTRY_ID
         }
     )
@@ -180,7 +267,7 @@ async def get_agent_card():
             "deployment": "agent-squad",
             "type": "registry",
             "protocols": ["A2A", "REST"],
-            "storage": "in-memory"
+            "storage": "postgresql"
         }
     }
 
@@ -188,16 +275,16 @@ async def get_agent_card():
 async def register_agent(registration: AgentRegistration):
     """
     Register an agent with the registry.
-    Fetches the agent card from the agent's URL.
+    Fetches the agent card from the agent's URL and stores in database.
     """
     agent_id = registration.agent_id
     agent_url = registration.agent_url
-    
+
     logger.info(f"Registering agent: {agent_id} at {agent_url}")
-    
+
     try:
         agent_card = registration.card
-        
+
         if not agent_card:
             # Fetch agent card from the agent's well-known endpoint
             async with httpx.AsyncClient() as client:
@@ -205,40 +292,73 @@ async def register_agent(registration: AgentRegistration):
                     f"{agent_url}/.well-known/agent-card",
                     timeout=10.0
                 )
-                
+
                 if response.status_code != 200:
                     raise HTTPException(
                         status_code=400,
                         detail=f"Failed to fetch agent card: {response.status_code}"
                     )
-                
+
                 agent_card = response.json()
-        
-        # Store agent information
-        agent_registry[agent_id] = {
-            "agent_id": agent_id,
-            "agent_url": agent_url,
-            "agent_name": agent_card.get("name", agent_id),
-            "description": agent_card.get("description", ""),
-            "skills": [s["name"] for s in agent_card.get("skills", [])],
-            "skill_details": agent_card.get("skills", []),
-            "card": agent_card,
-            "registered_at": datetime.now().isoformat(),
-            "last_health_check": datetime.now().isoformat(),
-            "status": "active",
-            "metadata": registration.metadata
-        }
-        
-        logger.info(f"Successfully registered: {agent_card.get('name')} ({agent_id})")
-        logger.info(f"  Skills: {agent_registry[agent_id]['skills']}")
-        
+
+        # Extract data from agent card
+        agent_name = agent_card.get("name", agent_id)
+        description = agent_card.get("description", "")
+
+        # Build skills JSONB: {skill_name: skill_details, ...}
+        skills_list = agent_card.get("skills", [])
+        skills_dict = {}
+        skill_names = []
+        for skill in skills_list:
+            skill_name = skill.get("name", skill.get("id", "unknown"))
+            skill_names.append(skill_name)
+            skills_dict[skill_name] = skill
+
+        # Get inbox topic from metadata
+        kafka_inbox_topic = registration.metadata.get("inbox_topic") if registration.metadata else None
+
+        # Build metadata including the full card for reference
+        metadata = registration.metadata or {}
+        metadata["card"] = agent_card
+        metadata["agent_url"] = agent_url
+
+        # Upsert agent into database
+        await db_pool.execute("""
+            INSERT INTO agents (
+                agent_id, name, description, skills,
+                kafka_inbox_topic, a2a_endpoint, status, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (agent_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                description = EXCLUDED.description,
+                skills = EXCLUDED.skills,
+                kafka_inbox_topic = EXCLUDED.kafka_inbox_topic,
+                a2a_endpoint = EXCLUDED.a2a_endpoint,
+                status = EXCLUDED.status,
+                metadata = EXCLUDED.metadata,
+                last_heartbeat_at = NOW(),
+                updated_at = NOW()
+        """,
+            agent_id,
+            agent_name,
+            description,
+            json.dumps(skills_dict),
+            kafka_inbox_topic,
+            agent_url,  # a2a_endpoint is the agent URL
+            "active",
+            json.dumps(metadata),
+        )
+
+        logger.info(f"Successfully registered: {agent_name} ({agent_id})")
+        logger.info(f"  Skills: {skill_names}")
+
         return {
             "status": "registered",
             "agent_id": agent_id,
-            "agent_name": agent_card.get("name"),
-            "skills": agent_registry[agent_id]['skills']
+            "agent_name": agent_name,
+            "skills": skill_names
         }
-    
+
     except httpx.RequestError as e:
         logger.error(f"Failed to connect to agent {agent_id}: {e}")
         raise HTTPException(
@@ -256,133 +376,200 @@ async def discover_agents(
 ):
     """
     Discover agents by skill or status.
-    
+
     Args:
         skill: Filter by specific skill (e.g., "coordinate_squad")
         status: Filter by status (e.g., "active")
-    
+
     Returns:
         Dictionary of agents matching the criteria
     """
-    
+    # Build query with optional filters
+    query = """
+        SELECT agent_id, name, description, skills, kafka_inbox_topic,
+               a2a_endpoint, status, metadata, created_at, last_heartbeat_at
+        FROM agents
+        WHERE ($1::text IS NULL OR status = $1)
+    """
+    rows = await db_pool.fetch(query, status)
+
     filtered_agents = {}
-    
-    for agent_id, agent_data in agent_registry.items():
-        # Apply filters
-        if skill and skill not in agent_data["skills"]:
+    for row in rows:
+        skills_data = row['skills'] or {}
+        skill_names = list(skills_data.keys()) if isinstance(skills_data, dict) else []
+
+        # Filter by skill if specified
+        if skill and skill not in skill_names:
             continue
-        
-        if status and agent_data.get("status") != status:
-            continue
-        
-        # Build response
-        filtered_agents[agent_id] = AgentInfo(
-            agent_id=agent_data["agent_id"],
-            agent_url=agent_data["agent_url"],
-            agent_name=agent_data["agent_name"],
-            description=agent_data["description"],
-            skills=agent_data["skills"],
-            registered_at=agent_data["registered_at"],
-            last_health_check=agent_data.get("last_health_check"),
-            status=agent_data["status"]
+
+        # Get agent_url from metadata or a2a_endpoint
+        metadata = row['metadata'] or {}
+        agent_url = metadata.get("agent_url") or row['a2a_endpoint'] or ""
+
+        filtered_agents[row['agent_id']] = AgentInfo(
+            agent_id=row['agent_id'],
+            agent_url=agent_url,
+            agent_name=row['name'],
+            description=row['description'] or "",
+            skills=skill_names,
+            registered_at=row['created_at'].isoformat() if row['created_at'] else "",
+            last_health_check=row['last_heartbeat_at'].isoformat() if row['last_heartbeat_at'] else None,
+            status=row['status'] or "active"
         )
-    
+
     logger.info(f"Discovery query - skill:{skill}, status:{status} - Found: {len(filtered_agents)} agents")
-    
+
     return filtered_agents
 
 @app.get("/agent/{agent_id}", response_model=Dict)
 async def get_agent_info(agent_id: str):
     """Get detailed information about a specific agent"""
-    
-    if agent_id not in agent_registry:
+    row = await db_pool.fetchrow("""
+        SELECT agent_id, name, description, skills, kafka_inbox_topic,
+               a2a_endpoint, status, metadata, created_at, last_heartbeat_at
+        FROM agents
+        WHERE agent_id = $1
+    """, agent_id)
+
+    if not row:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
-    
-    return agent_registry[agent_id]
+
+    skills_data = row['skills'] or {}
+    skill_names = list(skills_data.keys()) if isinstance(skills_data, dict) else []
+    metadata = row['metadata'] or {}
+    agent_url = metadata.get("agent_url") or row['a2a_endpoint'] or ""
+
+    return {
+        "agent_id": row['agent_id'],
+        "agent_url": agent_url,
+        "agent_name": row['name'],
+        "description": row['description'] or "",
+        "skills": skill_names,
+        "skill_details": list(skills_data.values()) if isinstance(skills_data, dict) else [],
+        "card": metadata.get("card"),
+        "registered_at": row['created_at'].isoformat() if row['created_at'] else None,
+        "last_health_check": row['last_heartbeat_at'].isoformat() if row['last_heartbeat_at'] else None,
+        "status": row['status'] or "active",
+        "metadata": metadata,
+    }
+
 
 @app.delete("/agent/{agent_id}")
 async def unregister_agent(agent_id: str):
     """Unregister an agent from the registry"""
-    
-    if agent_id not in agent_registry:
+    # Get agent name before deleting
+    row = await db_pool.fetchrow(
+        "SELECT name FROM agents WHERE agent_id = $1", agent_id
+    )
+
+    if not row:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
-    
-    agent_name = agent_registry[agent_id]["agent_name"]
-    del agent_registry[agent_id]
-    
+
+    agent_name = row['name']
+
+    # Delete the agent
+    await db_pool.execute("DELETE FROM agents WHERE agent_id = $1", agent_id)
+
     logger.info(f"Unregistered agent: {agent_name} ({agent_id})")
-    
+
     return {"status": "unregistered", "agent_id": agent_id}
+
 
 @app.post("/agent/{agent_id}/health")
 async def update_agent_health(agent_id: str, status: str = "active"):
     """Update agent's last health check timestamp and status"""
-    
-    if agent_id not in agent_registry:
+    result = await db_pool.execute("""
+        UPDATE agents
+        SET status = $2, last_heartbeat_at = NOW(), updated_at = NOW()
+        WHERE agent_id = $1
+    """, agent_id, status)
+
+    # Check if agent was found
+    if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
-    
-    agent_registry[agent_id]["last_health_check"] = datetime.now().isoformat()
-    agent_registry[agent_id]["status"] = status
-    
-    return {"status": "ok", "timestamp": agent_registry[agent_id]["last_health_check"], "agent_status": status}
+
+    timestamp = datetime.now().isoformat()
+
+    return {"status": "ok", "timestamp": timestamp, "agent_status": status}
 
 @app.get("/skills")
 async def list_all_skills():
     """List all unique skills available across all agents"""
-    
+    rows = await db_pool.fetch("""
+        SELECT agent_id, name, skills, a2a_endpoint, metadata
+        FROM agents
+    """)
+
     all_skills = set()
     skill_to_agents = {}
-    
-    for agent_id, agent_data in agent_registry.items():
-        for skill in agent_data["skills"]:
+
+    for row in rows:
+        skills_data = row['skills'] or {}
+        skill_names = list(skills_data.keys()) if isinstance(skills_data, dict) else []
+        metadata = row['metadata'] or {}
+        agent_url = metadata.get("agent_url") or row['a2a_endpoint'] or ""
+
+        for skill in skill_names:
             all_skills.add(skill)
-            
+
             if skill not in skill_to_agents:
                 skill_to_agents[skill] = []
-            
+
             skill_to_agents[skill].append({
-                "agent_id": agent_id,
-                "agent_name": agent_data["agent_name"],
-                "agent_url": agent_data["agent_url"]
+                "agent_id": row['agent_id'],
+                "agent_name": row['name'],
+                "agent_url": agent_url
             })
-    
+
     return {
         "total_skills": len(all_skills),
         "skills": sorted(list(all_skills)),
         "skill_mapping": skill_to_agents
     }
 
+
 @app.get("/stats")
 async def get_registry_stats():
     """Get statistics about the agent registry"""
-    
-    total_agents = len(agent_registry)
-    active_agents = sum(1 for a in agent_registry.values() if a.get("status") == "active")
-    
+    rows = await db_pool.fetch("""
+        SELECT agent_id, name, skills, status
+        FROM agents
+    """)
+
+    total_agents = len(rows)
+    active_agents = sum(1 for row in rows if row['status'] == "active")
+
     skill_counts = {}
-    for agent_data in agent_registry.values():
-        for skill in agent_data["skills"]:
+    agents_list = []
+
+    for row in rows:
+        skills_data = row['skills'] or {}
+        skill_names = list(skills_data.keys()) if isinstance(skills_data, dict) else []
+
+        for skill in skill_names:
             skill_counts[skill] = skill_counts.get(skill, 0) + 1
-    
+
+        agents_list.append({
+            "id": row['agent_id'],
+            "name": row['name'],
+            "status": row['status'] or "unknown"
+        })
+
     return {
         "total_agents": total_agents,
         "active_agents": active_agents,
         "total_skills": len(skill_counts),
         "skill_distribution": skill_counts,
-        "agents": [
-            {
-                "id": a["agent_id"],
-                "name": a["agent_name"],
-                "status": a["status"]
-            }
-            for a in agent_registry.values()
-        ]
+        "agents": agents_list
     }
+
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "agents": len(agent_registry)}
+    # Get agent count from database
+    count = await db_pool.fetchval("SELECT COUNT(*) FROM agents")
+    return {"status": "healthy", "agents": count}
 
 # --- Startup Event ---
 
@@ -393,6 +580,8 @@ async def startup_event():
     logger.info(f"Registry ID: {REGISTRY_ID}")
     logger.info(f"Registry URL: {REGISTRY_URL}")
     logger.info(f"Port: {REGISTRY_PORT}")
+    logger.info(f"Storage: PostgreSQL")
+    logger.info(f"Heartbeat stale threshold: {HEARTBEAT_STALE_THRESHOLD_SECONDS}s")
     logger.info(f"A2A Agent Card: {REGISTRY_URL}/.well-known/agent-card")
     logger.info("=" * 60)
     logger.info("Available Skills:")
