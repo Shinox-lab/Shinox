@@ -269,7 +269,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.0.5" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "shinox-agent-sdk", editable = "../../shinox-agent-sdk" },
+    { name = "shinox-agent-sdk", specifier = ">=0.1.0" },
     { name = "uvicorn", specifier = ">=0.40.0" },
 ]
 
@@ -1046,25 +1046,16 @@ wheels = [
 [[package]]
 name = "shinox-agent-sdk"
 version = "0.1.0"
-source = { editable = "../../shinox-agent-sdk" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "faststream", extra = ["kafka"] },
     { name = "httpx" },
     { name = "pydantic" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "faststream", extras = ["kafka"], specifier = ">=0.5.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.2.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
-    { name = "shinox-agent-sdk", extras = ["langchain", "dev"], marker = "extra == 'all'" },
+sdist = { url = "https://files.pythonhosted.org/packages/3e/23/acd664628e4865b510e449b86399a0b299a055b527a44722480897359d94/shinox_agent_sdk-0.1.0.tar.gz", hash = "sha256:1184d121355c1b8059778d00a4a4ac776192668b51f7978d48fbe679ff093d48", size = 10314, upload-time = "2026-01-28T17:39:21.484Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1f/f2/a8f523c5f7b0457b8e2c5a0928d6882d0fc437f849e07d7dad427888a876/shinox_agent_sdk-0.1.0-py3-none-any.whl", hash = "sha256:1961038f40056ec95f9d0d4ac88351e9cf0b249d04a9910545fdd4c7745b53a0", size = 11990, upload-time = "2026-01-28T17:39:19.952Z" },
 ]
-provides-extras = ["langchain", "dev", "all"]
 
 [[package]]
 name = "sniffio"

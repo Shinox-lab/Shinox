@@ -5,16 +5,12 @@ description = "Squad Lead Agent - Orchestrator for Shinox mesh"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "shinox-agent-sdk",
     "a2a-sdk>=0.3.22",
-    "agent-transparency[server,ui]",
     "faststream[cli,kafka]>=0.6.5",
     "httpx>=0.28.1",
     "langchain-openai>=1.1.6",
     "langgraph>=1.0.5",
     "pydantic>=2.12.5",
     "dotenv>=0.9.9",
+    "shinox-agent-sdk>=0.1.0",
 ]
-
-[tool.uv.sources]
-shinox-agent-sdk = { path = "../../shinox-agent-sdk", editable = true }
