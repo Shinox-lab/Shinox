@@ -22,6 +22,31 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://admin:adminpassword@local
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:19092")
 API_PORT = int(os.getenv("API_PORT", "8002"))
 
+
+def parse_jsonb(value) -> dict:
+    """Parse a JSONB field that may be a string or dict."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def map_agent_status(status: str) -> str:
+    """Map database status to frontend expected status."""
+    status_map = {
+        "active": "ONLINE",
+        "offline": "OFFLINE",
+        "busy": "BUSY",
+        "hibernating": "HIBERNATING",
+    }
+    return status_map.get(status, "OFFLINE")
+
 # Global connections
 db_pool: Optional[asyncpg.Pool] = None
 kafka_producer: Optional[AIOKafkaProducer] = None
@@ -231,21 +256,22 @@ async def get_squads(
         """
         members_rows = await db_pool.fetch(members_query, row['squad_name'])
 
-        members = [
-            {
+        members = []
+        for m in members_rows:
+            skills_data = parse_jsonb(m['skills'])
+            skill_names = list(skills_data.keys()) if skills_data else []
+            members.append({
                 "agent": {
                     "agentId": m['agent_id'],
                     "name": m['name'],
-                    "description": m['description'],
-                    "skills": m['skills'] or {},
-                    "status": m['agent_status'],
+                    "description": m['description'] or "",
+                    "skills": skill_names,
+                    "status": map_agent_status(m['agent_status'] or "offline"),
                 },
                 "role": m['role'],
                 "joinedAt": m['joined_at'].isoformat() if m['joined_at'] else None,
                 "contextTokens": m['context_tokens'] or 0,
-            }
-            for m in members_rows
-        ]
+            })
 
         squads.append({
             "squadId": row['squad_name'],
@@ -255,7 +281,7 @@ async def get_squads(
             "status": row['status'],
             "kafkaTopic": row['kafka_inbox_topic'],
             "triggerSource": row['trigger_source'],
-            "metadata": row['metadata'],
+            "metadata": parse_jsonb(row['metadata']),
             "members": members,
             "createdAt": row['created_at'].isoformat() if row['created_at'] else None,
         })
@@ -290,21 +316,22 @@ async def get_squad(squad_id: str):
     """
     members_rows = await db_pool.fetch(members_query, row['squad_name'])
 
-    members = [
-        {
+    members = []
+    for m in members_rows:
+        skills_data = parse_jsonb(m['skills'])
+        skill_names = list(skills_data.keys()) if skills_data else []
+        members.append({
             "agent": {
                 "agentId": m['agent_id'],
                 "name": m['name'],
-                "description": m['description'],
-                "skills": m['skills'] or {},
-                "status": m['agent_status'],
+                "description": m['description'] or "",
+                "skills": skill_names,
+                "status": map_agent_status(m['agent_status'] or "offline"),
             },
             "role": m['role'],
             "joinedAt": m['joined_at'].isoformat() if m['joined_at'] else None,
             "contextTokens": m['context_tokens'] or 0,
-        }
-        for m in members_rows
-    ]
+        })
 
     return {
         "squadId": row['squad_name'],
@@ -314,7 +341,7 @@ async def get_squad(squad_id: str):
         "status": row['status'],
         "kafkaTopic": row['kafka_inbox_topic'],
         "triggerSource": row['trigger_source'],
-        "metadata": row['metadata'],
+        "metadata": parse_jsonb(row['metadata']),
         "members": members,
         "createdAt": row['created_at'].isoformat() if row['created_at'] else None,
     }
@@ -429,20 +456,25 @@ async def get_agents(
     """
     rows = await db_pool.fetch(query, status)
 
-    return [
-        {
+    agents = []
+    for row in rows:
+        # Parse skills JSONB and extract skill names as array
+        skills_data = parse_jsonb(row['skills'])
+        skill_names = list(skills_data.keys()) if skills_data else []
+
+        agents.append({
             "agentId": row['agent_id'],
             "name": row['name'],
-            "description": row['description'],
-            "skills": row['skills'] or {},
+            "description": row['description'] or "",
+            "skills": skill_names,
             "kafkaInboxTopic": row['kafka_inbox_topic'],
             "a2aEndpoint": row['a2a_endpoint'],
-            "status": row['status'],
+            "status": map_agent_status(row['status'] or "offline"),
             "lastHeartbeat": row['last_heartbeat_at'].isoformat() if row['last_heartbeat_at'] else None,
             "createdAt": row['created_at'].isoformat() if row['created_at'] else None,
-        }
-        for row in rows
-    ]
+        })
+
+    return agents
 
 
 # ==========================================
