@@ -25,7 +25,7 @@ import os
 REGISTRY_ID = os.getenv("REGISTRY_ID", "agent-registry-001")
 REGISTRY_URL = os.getenv("REGISTRY_URL", "http://localhost:9000")
 REGISTRY_PORT = int(os.getenv("REGISTRY_PORT", "9000"))
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://admin:adminpassword@localhost:5432/agentsquaddb")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://admin:adminpassword@localhost:5432/agentsquaddb?sslmode=disable")
 
 # Heartbeat configuration: mark agents as offline if no heartbeat for this many seconds
 HEARTBEAT_STALE_THRESHOLD_SECONDS = int(os.getenv("HEARTBEAT_STALE_THRESHOLD", "20"))
@@ -33,6 +33,20 @@ HEARTBEAT_CHECK_INTERVAL_SECONDS = int(os.getenv("HEARTBEAT_CHECK_INTERVAL", "10
 
 logger = logging.getLogger("AgentRegistry")
 logging.basicConfig(level=logging.INFO)
+
+
+def parse_jsonb(value) -> dict:
+    """Parse a JSONB field that may be a string or dict."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return {}
 
 # --- Database Connection Pool ---
 db_pool: Optional[asyncpg.Pool] = None
@@ -148,29 +162,40 @@ async def dashboard(request: Request):
         SELECT agent_id, name, description, skills, kafka_inbox_topic,
                a2a_endpoint, status, metadata, created_at, last_heartbeat_at
         FROM agents
-        ORDER BY agent_id
+        ORDER BY status DESC, agent_id
     """)
 
     agents = []
     all_skills = set()
+    active_count = 0
     for row in rows:
-        skills_data = row['skills'] or {}
-        # Extract skill names from the skills JSONB
-        skill_names = list(skills_data.keys()) if isinstance(skills_data, dict) else []
+        skills_data = parse_jsonb(row['skills'])
+        skill_names = list(skills_data.keys())
         all_skills.update(skill_names)
+
+        metadata = parse_jsonb(row['metadata'])
+        agent_url = metadata.get("agent_url") or row['a2a_endpoint'] or ""
+
+        status = row['status'] or "unknown"
+        if status == "active":
+            active_count += 1
 
         agents.append({
             "agent_id": row['agent_id'],
             "agent_name": row['name'],
             "description": row['description'] or "",
             "skills": skill_names,
-            "status": row['status'] or "active",
+            "status": status,
+            "agent_url": agent_url,
+            "kafka_inbox_topic": row['kafka_inbox_topic'] or "",
             "registered_at": row['created_at'].isoformat() if row['created_at'] else None,
             "last_health_check": row['last_heartbeat_at'].isoformat() if row['last_heartbeat_at'] else None,
         })
 
     stats = {
         "total_agents": len(agents),
+        "active_agents": active_count,
+        "offline_agents": len(agents) - active_count,
         "total_skills": len(all_skills)
     }
 
@@ -180,7 +205,8 @@ async def dashboard(request: Request):
             "request": request,
             "stats": stats,
             "agents": agents,
-            "Registry_ID": REGISTRY_ID
+            "Registry_ID": REGISTRY_ID,
+            "heartbeat_threshold": HEARTBEAT_STALE_THRESHOLD_SECONDS,
         }
     )
 
@@ -395,15 +421,14 @@ async def discover_agents(
 
     filtered_agents = {}
     for row in rows:
-        skills_data = row['skills'] or {}
-        skill_names = list(skills_data.keys()) if isinstance(skills_data, dict) else []
+        skills_data = parse_jsonb(row['skills'])
+        skill_names = list(skills_data.keys())
 
         # Filter by skill if specified
         if skill and skill not in skill_names:
             continue
 
-        # Get agent_url from metadata or a2a_endpoint
-        metadata = row['metadata'] or {}
+        metadata = parse_jsonb(row['metadata'])
         agent_url = metadata.get("agent_url") or row['a2a_endpoint'] or ""
 
         filtered_agents[row['agent_id']] = AgentInfo(
@@ -434,9 +459,9 @@ async def get_agent_info(agent_id: str):
     if not row:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
 
-    skills_data = row['skills'] or {}
-    skill_names = list(skills_data.keys()) if isinstance(skills_data, dict) else []
-    metadata = row['metadata'] or {}
+    skills_data = parse_jsonb(row['skills'])
+    skill_names = list(skills_data.keys())
+    metadata = parse_jsonb(row['metadata'])
     agent_url = metadata.get("agent_url") or row['a2a_endpoint'] or ""
 
     return {
@@ -445,7 +470,7 @@ async def get_agent_info(agent_id: str):
         "agent_name": row['name'],
         "description": row['description'] or "",
         "skills": skill_names,
-        "skill_details": list(skills_data.values()) if isinstance(skills_data, dict) else [],
+        "skill_details": list(skills_data.values()),
         "card": metadata.get("card"),
         "registered_at": row['created_at'].isoformat() if row['created_at'] else None,
         "last_health_check": row['last_heartbeat_at'].isoformat() if row['last_heartbeat_at'] else None,
@@ -504,9 +529,9 @@ async def list_all_skills():
     skill_to_agents = {}
 
     for row in rows:
-        skills_data = row['skills'] or {}
-        skill_names = list(skills_data.keys()) if isinstance(skills_data, dict) else []
-        metadata = row['metadata'] or {}
+        skills_data = parse_jsonb(row['skills'])
+        skill_names = list(skills_data.keys())
+        metadata = parse_jsonb(row['metadata'])
         agent_url = metadata.get("agent_url") or row['a2a_endpoint'] or ""
 
         for skill in skill_names:
@@ -543,8 +568,8 @@ async def get_registry_stats():
     agents_list = []
 
     for row in rows:
-        skills_data = row['skills'] or {}
-        skill_names = list(skills_data.keys()) if isinstance(skills_data, dict) else []
+        skills_data = parse_jsonb(row['skills'])
+        skill_names = list(skills_data.keys())
 
         for skill in skill_names:
             skill_counts[skill] = skill_counts.get(skill, 0) + 1
