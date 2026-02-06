@@ -4,7 +4,7 @@ import yaml
 import uuid
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import httpx
 from fastapi import FastAPI, HTTPException
 from contextlib import asynccontextmanager
@@ -218,7 +218,7 @@ async def dispatch_event(event: OrganizationalEvent):
             "id": str(uuid.uuid4()),
             "type": "SYSTEM_LOG",
             "source": "Director",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "content": json.dumps(decision),
             "correlation_id": correlation_id,
             "metadata": {
@@ -247,7 +247,7 @@ async def dispatch_event(event: OrganizationalEvent):
     # Sanitize title for topic name
     safe_title = "".join(c for c in title.lower().replace(' ', '_') if c.isalnum() or c == '_')
     session_id = f"session.{safe_title}_{uuid.uuid4().hex[:4]}"
-    session_created_at = datetime.now().isoformat()
+    session_created_at = datetime.now(timezone.utc).isoformat()
     
     # 3.1 Create the Session Topic
     try:
@@ -306,7 +306,7 @@ async def dispatch_event(event: OrganizationalEvent):
             "id": invite_id,
             "type": "SYSTEM_COMMAND",
             "source": "Director",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "content": "You have been drafted.",
             "correlation_id": correlation_id,  # Link to original request
             "metadata": {
@@ -346,7 +346,7 @@ async def dispatch_event(event: OrganizationalEvent):
     
     briefing_payload = {
         "id": str(uuid.uuid4()),
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "content": f"## MISSION BRIEFING\n\n**Goal:** {decision['briefing_note']}\n**Priority:** {decision.get('priority')}\n**Source:** {event.source}. @squad-lead-agent , please coordinate the squad.",
         "correlation_id": correlation_id,  # Link entire session to original request
         "headers": briefing_headers_dict,
