@@ -8,7 +8,7 @@ import json
 import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
@@ -185,7 +185,7 @@ async def consume_kafka_messages():
                 ws_message = {
                     'type': event_type,
                     'payload': data,
-                    'timestamp': datetime.utcnow().isoformat(),
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
                 }
 
                 if conversation_id:
@@ -404,7 +404,7 @@ async def send_message(squad_id: str, request: SendMessageRequest):
         raise HTTPException(status_code=404, detail="Squad not found")
 
     message_id = str(uuid.uuid4())
-    timestamp = datetime.utcnow().isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
 
     # Create message payload
     message_payload = {
@@ -678,7 +678,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     message_id = str(uuid.uuid4())
                     message_payload = {
                         "id": message_id,
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                         "source_agent_id": "human-admin",
                         "conversation_id": squad_id,
                         "type": "THOUGHT",
