@@ -44,7 +44,9 @@ def node_monitor(state: SquadState):
 
     if state.get("squad_status") == "UPDATING":
         result = {"squad_status": "UPDATING"}
-    elif "MISSION" in str(last_msg.content) or "Please" in str(last_msg.content): 
+    elif "having difficulty" in str(last_msg.content) or "need help" in str(last_msg.content).lower():
+        result = {"squad_status": "UPDATING"}
+    elif "MISSION" in str(last_msg.content) or "Please" in str(last_msg.content):
         result = {"squad_status": "PLANNING"}
     else:
         # If currently EXECUTING, we don't switch to IDLE automatically essentially blocking the loop
@@ -173,6 +175,7 @@ def node_updater(state: SquadState):
     """
     Updates the state after task execution (removes the finished task).
     Also stores completed results for context injection into subsequent stages.
+    Handles re-delegation when a worker reports it is stuck.
     """
     last_msg = state['messages'][-1]
     source_agent = last_msg.name
@@ -181,6 +184,52 @@ def node_updater(state: SquadState):
     assignments = state.get('assignments', {}).copy()
     plan = state.get('plan', [])
     completed_results = state.get('completed_results', {}).copy()
+    available_agents = state.get('available_squad_agents', [])
+
+    # --- Help Request Detection: Re-delegate to a fallback agent ---
+    if "having difficulty with a task" in result_content:
+        # Find the stuck agent's original task
+        original_task = assignments.get(source_agent)
+
+        if original_task and plan:
+            # Remove stuck agent from assignments
+            if source_agent in assignments:
+                del assignments[source_agent]
+
+            # Find a fallback agent (first available that isn't the stuck one)
+            fallback_agent = None
+            for agent_entry in available_agents:
+                agent_id = agent_entry.split(":")[0].strip() if ":" in agent_entry else agent_entry.strip()
+                if agent_id != source_agent and agent_id != "squad-lead-agent":
+                    fallback_agent = agent_id
+                    break
+
+            if fallback_agent:
+                # Extract instruction from original task
+                instruction = original_task.split(":", 1)[1].strip() if ":" in original_task else original_task
+                new_task = f"{fallback_agent}: {instruction}"
+
+                # Rebuild the current stage with the fallback agent
+                current_stage = plan[0]
+                new_stage = [t for t in current_stage if not t.startswith(f"{source_agent}:")]
+                new_stage.append(new_task)
+                new_plan = [new_stage] + plan[1:]
+
+                return {
+                    "assignments": assignments,
+                    "plan": new_plan,
+                    "squad_status": "EXECUTING",
+                    "completed_results": completed_results,
+                }
+
+        # Fallback: no original task found or no plan, just continue
+        return {
+            "assignments": assignments,
+            "squad_status": "EXECUTING",
+            "completed_results": completed_results,
+        }
+
+    # --- Normal update: task completed successfully ---
 
     # Store the completed result for context injection
     completed_results[source_agent] = result_content

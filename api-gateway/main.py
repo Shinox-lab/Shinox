@@ -5,7 +5,9 @@ squad data, messages, and real-time Kafka updates.
 """
 import asyncio
 import json
+import logging
 import os
+import sys
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -16,6 +18,20 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from pythonjsonlogger.json import JsonFormatter
+
+# --- Structured JSON Logging ---
+_formatter = JsonFormatter(
+    fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+    rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
+    static_fields={"service": "api-gateway"},
+)
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(_formatter)
+logging.root.handlers.clear()
+logging.root.addHandler(_handler)
+logging.root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger("ApiGateway")
 
 # Configuration
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://admin:adminpassword@localhost:5432/agentsquaddb")
@@ -126,20 +142,20 @@ async def lifespan(app: FastAPI):
     global db_pool, kafka_producer, kafka_consumer
 
     # Startup
-    print(f"Connecting to database: {DATABASE_URL}")
+    logger.info("Connecting to database: %s", DATABASE_URL)
     db_pool = await asyncpg.create_pool(
         DATABASE_URL,
         min_size=5,
         max_size=20,
     )
-    print("Database connected")
+    logger.info("Database connected")
 
     kafka_producer = AIOKafkaProducer(
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         value_serializer=lambda v: json.dumps(v).encode('utf-8'),
     )
     await kafka_producer.start()
-    print("Kafka producer started")
+    logger.info("Kafka producer started")
 
     # Start Kafka consumer for real-time updates
     kafka_consumer = AIOKafkaConsumer(
@@ -149,7 +165,7 @@ async def lifespan(app: FastAPI):
         auto_offset_reset='latest',
     )
     await kafka_consumer.start()
-    print("Kafka consumer started")
+    logger.info("Kafka consumer started")
 
     # Start background task for consuming Kafka messages
     consumer_task = asyncio.create_task(consume_kafka_messages())
@@ -169,7 +185,7 @@ async def lifespan(app: FastAPI):
         await kafka_producer.stop()
     if db_pool:
         await db_pool.close()
-    print("Shutdown complete")
+    logger.info("Shutdown complete")
 
 
 async def consume_kafka_messages():
@@ -193,7 +209,7 @@ async def consume_kafka_messages():
                 else:
                     await manager.broadcast_all(ws_message)
             except Exception as e:
-                print(f"Error processing Kafka message: {e}")
+                logger.error("Error processing Kafka message: %s", e)
     except asyncio.CancelledError:
         pass
 

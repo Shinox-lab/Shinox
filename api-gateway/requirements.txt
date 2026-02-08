@@ -4,3 +4,4 @@ asyncpg>=0.29.0
 aiokafka>=0.10.0
 pydantic>=2.5.0
 python-dotenv>=1.0.0
+python-json-logger>=3.0.0

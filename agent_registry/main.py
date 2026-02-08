@@ -5,6 +5,11 @@ Central registry for agent discovery in the Agent Squad ecosystem.
 Agents register themselves on startup and can query for other agents.
 
 This registry is itself an A2A-compliant agent that provides discovery services.
+
+Features:
+- Agent registration with A2A agent card
+- Semantic embeddings for heuristic wake-up (using sentence-transformers)
+- Multi-vector matching with per-skill embeddings
 """
 
 import asyncio
@@ -20,6 +25,10 @@ from pydantic import BaseModel, Field
 import asyncpg
 import httpx
 import os
+import numpy as np
+
+# Lazy load sentence-transformers to speed up startup
+_embedding_model = None
 
 # --- Configuration ---
 REGISTRY_ID = os.getenv("REGISTRY_ID", "agent-registry-001")
@@ -27,12 +36,55 @@ REGISTRY_URL = os.getenv("REGISTRY_URL", "http://localhost:9000")
 REGISTRY_PORT = int(os.getenv("REGISTRY_PORT", "9000"))
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://admin:adminpassword@localhost:5432/agentsquaddb?sslmode=disable")
 
+# Embedding model configuration
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_DIMENSIONS = 384  # all-MiniLM-L6-v2 produces 384-dimensional vectors
+
+
+def get_embedding_model():
+    """Lazy load the embedding model."""
+    global _embedding_model
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+        logger.info(f"Loading embedding model: {EMBEDDING_MODEL_NAME}")
+        _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        logger.info("Embedding model loaded successfully")
+    return _embedding_model
+
+
+def generate_embedding(text: str) -> List[float]:
+    """Generate embedding for a text string."""
+    model = get_embedding_model()
+    embedding = model.encode(text, convert_to_numpy=True)
+    return embedding.tolist()
+
+
+def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
+    """Generate embeddings for multiple texts in a batch (more efficient)."""
+    if not texts:
+        return []
+    model = get_embedding_model()
+    embeddings = model.encode(texts, convert_to_numpy=True)
+    return embeddings.tolist()
+
 # Heartbeat configuration: mark agents as offline if no heartbeat for this many seconds
 HEARTBEAT_STALE_THRESHOLD_SECONDS = int(os.getenv("HEARTBEAT_STALE_THRESHOLD", "20"))
 HEARTBEAT_CHECK_INTERVAL_SECONDS = int(os.getenv("HEARTBEAT_CHECK_INTERVAL", "10"))
 
 logger = logging.getLogger("AgentRegistry")
-logging.basicConfig(level=logging.INFO)
+
+import sys
+from pythonjsonlogger.json import JsonFormatter
+_formatter = JsonFormatter(
+    fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+    rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
+    static_fields={"service": "agent-registry"},
+)
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(_formatter)
+logging.root.handlers.clear()
+logging.root.addHandler(_handler)
+logging.root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
 
 def parse_jsonb(value) -> dict:
@@ -149,6 +201,25 @@ class AgentInfo(BaseModel):
     registered_at: str
     last_health_check: Optional[str] = None
     status: str = "active"
+
+
+class SessionMessage(BaseModel):
+    """A message in a session history."""
+    message_id: str
+    source_agent_id: str
+    target_agent_id: Optional[str] = None
+    interaction_type: str
+    content: str
+    created_at: str
+    metadata: Optional[Dict] = None
+
+
+class SessionHistoryResponse(BaseModel):
+    """Response for session history queries."""
+    session_id: str
+    total_count: int
+    messages: List[SessionMessage]
+    has_more: bool
 
 # --- Endpoints ---
 
@@ -348,12 +419,40 @@ async def register_agent(registration: AgentRegistration):
         metadata["card"] = agent_card
         metadata["agent_url"] = agent_url
 
-        # Upsert agent into database
+        # Generate embeddings for semantic matching
+        logger.info(f"Generating embeddings for {agent_id}...")
+
+        # 1. Description embedding
+        description_embedding = None
+        if description:
+            description_embedding = generate_embedding(description)
+
+        # 2. Skill embeddings - embed each skill's name + description
+        skill_embeddings_data = []
+        for skill in skills_list:
+            skill_name = skill.get("name", skill.get("id", "unknown"))
+            skill_desc = skill.get("description", "")
+            # Combine skill name and description for richer embedding
+            skill_text = f"{skill_name}: {skill_desc}" if skill_desc else skill_name
+            skill_embedding = generate_embedding(skill_text)
+            skill_embeddings_data.append({
+                "skill_name": skill_name,
+                "skill_text": skill_text[:1000],  # Truncate if too long
+                "embedding": skill_embedding
+            })
+
+        # Convert description embedding to pgvector format
+        desc_emb_str = None
+        if description_embedding:
+            desc_emb_str = "[" + ",".join(map(str, description_embedding)) + "]"
+
+        # Upsert agent into database (with description embedding)
         await db_pool.execute("""
             INSERT INTO agents (
                 agent_id, name, description, skills,
-                kafka_inbox_topic, a2a_endpoint, status, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                kafka_inbox_topic, a2a_endpoint, status, metadata,
+                description_embedding
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector)
             ON CONFLICT (agent_id) DO UPDATE SET
                 name = EXCLUDED.name,
                 description = EXCLUDED.description,
@@ -362,6 +461,7 @@ async def register_agent(registration: AgentRegistration):
                 a2a_endpoint = EXCLUDED.a2a_endpoint,
                 status = EXCLUDED.status,
                 metadata = EXCLUDED.metadata,
+                description_embedding = EXCLUDED.description_embedding,
                 last_heartbeat_at = NOW(),
                 updated_at = NOW()
         """,
@@ -373,16 +473,37 @@ async def register_agent(registration: AgentRegistration):
             agent_url,  # a2a_endpoint is the agent URL
             "active",
             json.dumps(metadata),
+            desc_emb_str,
         )
+
+        # Delete old skill embeddings and insert new ones
+        await db_pool.execute(
+            "DELETE FROM agent_skill_embeddings WHERE agent_id = $1",
+            agent_id
+        )
+
+        for skill_data in skill_embeddings_data:
+            emb_str = "[" + ",".join(map(str, skill_data["embedding"])) + "]"
+            await db_pool.execute("""
+                INSERT INTO agent_skill_embeddings (agent_id, skill_name, skill_text, embedding)
+                VALUES ($1, $2, $3, $4::vector)
+            """,
+                agent_id,
+                skill_data["skill_name"],
+                skill_data["skill_text"],
+                emb_str
+            )
 
         logger.info(f"Successfully registered: {agent_name} ({agent_id})")
         logger.info(f"  Skills: {skill_names}")
+        logger.info(f"  Embeddings: description + {len(skill_embeddings_data)} skills")
 
         return {
             "status": "registered",
             "agent_id": agent_id,
             "agent_name": agent_name,
-            "skills": skill_names
+            "skills": skill_names,
+            "embeddings_generated": True
         }
 
     except httpx.RequestError as e:
@@ -479,6 +600,211 @@ async def get_agent_info(agent_id: str):
     }
 
 
+@app.get("/agent/{agent_id}/embeddings", response_model=Dict)
+async def get_agent_embeddings(agent_id: str):
+    """
+    Get embeddings for an agent (for semantic wake-up).
+
+    Returns the description embedding and all skill embeddings
+    that agents use for semantic similarity matching.
+    """
+    # Get description embedding from agents table
+    agent_row = await db_pool.fetchrow("""
+        SELECT agent_id, description, description_embedding
+        FROM agents
+        WHERE agent_id = $1
+    """, agent_id)
+
+    if not agent_row:
+        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+
+    # Get skill embeddings from agent_skill_embeddings table
+    skill_rows = await db_pool.fetch("""
+        SELECT skill_name, skill_text, embedding
+        FROM agent_skill_embeddings
+        WHERE agent_id = $1
+    """, agent_id)
+
+    # Parse description embedding (pgvector returns as string or list)
+    description_embedding = None
+    if agent_row['description_embedding']:
+        emb = agent_row['description_embedding']
+        if isinstance(emb, str):
+            # Parse "[0.1,0.2,...]" format
+            description_embedding = json.loads(emb.replace("(", "[").replace(")", "]"))
+        elif hasattr(emb, 'tolist'):
+            description_embedding = emb.tolist()
+        else:
+            description_embedding = list(emb)
+
+    # Parse skill embeddings
+    skill_embeddings = {}
+    for row in skill_rows:
+        emb = row['embedding']
+        if isinstance(emb, str):
+            emb_list = json.loads(emb.replace("(", "[").replace(")", "]"))
+        elif hasattr(emb, 'tolist'):
+            emb_list = emb.tolist()
+        else:
+            emb_list = list(emb)
+
+        skill_embeddings[row['skill_name']] = {
+            "text": row['skill_text'],
+            "embedding": emb_list
+        }
+
+    return {
+        "agent_id": agent_id,
+        "description": agent_row['description'],
+        "description_embedding": description_embedding,
+        "skill_embeddings": skill_embeddings,
+        "embedding_dimensions": EMBEDDING_DIMENSIONS,
+        "model": EMBEDDING_MODEL_NAME
+    }
+
+
+@app.get("/session/{session_id}/history", response_model=SessionHistoryResponse)
+async def get_session_history(
+    session_id: str,
+    filter_agent: Optional[str] = None,
+    filter_type: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    include_content: bool = True,
+):
+    """
+    Get message history for a session.
+
+    This endpoint enables agents to query their session history for context.
+    Used by the Agent History Tool for on-demand context retrieval.
+
+    Args:
+        session_id: The session/conversation ID (e.g., "session.my_squad_123")
+        filter_agent: Optional - only get messages from this agent
+        filter_type: Optional - filter by interaction_type (e.g., "TASK_RESULT", "TASK_ASSIGNMENT")
+        limit: Max number of messages to return (default: 50, max: 200)
+        offset: Number of messages to skip (for pagination)
+        include_content: Whether to include full message content (default: True)
+
+    Returns:
+        SessionHistoryResponse with messages sorted by created_at ascending
+    """
+    # Validate limits
+    limit = min(limit, 200)
+
+    # Build query with filters
+    conditions = ["conversation_id = $1"]
+    params = [session_id]
+    param_count = 1
+
+    if filter_agent:
+        param_count += 1
+        conditions.append(f"source_agent_id = ${param_count}")
+        params.append(filter_agent)
+
+    if filter_type:
+        param_count += 1
+        conditions.append(f"interaction_type = ${param_count}")
+        params.append(filter_type)
+
+    where_clause = " AND ".join(conditions)
+
+    # Get total count
+    count_query = f"SELECT COUNT(*) FROM messages WHERE {where_clause}"
+    total_count = await db_pool.fetchval(count_query, *params)
+
+    # Get messages with pagination
+    select_fields = "message_id, source_agent_id, target_agent_id, interaction_type, created_at, metadata"
+    if include_content:
+        select_fields += ", content"
+
+    query = f"""
+        SELECT {select_fields}
+        FROM messages
+        WHERE {where_clause}
+        ORDER BY created_at ASC
+        LIMIT ${param_count + 1} OFFSET ${param_count + 2}
+    """
+    params.extend([limit, offset])
+
+    rows = await db_pool.fetch(query, *params)
+
+    # Build response
+    messages = []
+    for row in rows:
+        msg = SessionMessage(
+            message_id=row['message_id'],
+            source_agent_id=row['source_agent_id'],
+            target_agent_id=row['target_agent_id'],
+            interaction_type=row['interaction_type'],
+            content=row['content'] if include_content else "[content hidden]",
+            created_at=row['created_at'].isoformat() if row['created_at'] else "",
+            metadata=parse_jsonb(row['metadata']) if row['metadata'] else None,
+        )
+        messages.append(msg)
+
+    has_more = (offset + len(messages)) < total_count
+
+    logger.info(
+        f"Session history query - session:{session_id}, "
+        f"filter_agent:{filter_agent}, filter_type:{filter_type}, "
+        f"returned {len(messages)}/{total_count} messages"
+    )
+
+    return SessionHistoryResponse(
+        session_id=session_id,
+        total_count=total_count,
+        messages=messages,
+        has_more=has_more,
+    )
+
+
+@app.get("/session/{session_id}/results")
+async def get_session_results(
+    session_id: str,
+    limit: int = 20,
+):
+    """
+    Get TASK_RESULT messages for a session (shortcut for common use case).
+
+    This is a convenience endpoint for agents that need to see what
+    other agents have produced in the session.
+
+    Args:
+        session_id: The session/conversation ID
+        limit: Max number of results to return (default: 20)
+
+    Returns:
+        List of task results with agent_id and content
+    """
+    limit = min(limit, 100)
+
+    rows = await db_pool.fetch("""
+        SELECT source_agent_id, content, created_at
+        FROM messages
+        WHERE conversation_id = $1
+          AND interaction_type = 'TASK_RESULT'
+        ORDER BY created_at ASC
+        LIMIT $2
+    """, session_id, limit)
+
+    results = []
+    for row in rows:
+        results.append({
+            "agent_id": row['source_agent_id'],
+            "content": row['content'],
+            "created_at": row['created_at'].isoformat() if row['created_at'] else "",
+        })
+
+    logger.info(f"Session results query - session:{session_id}, returned {len(results)} results")
+
+    return {
+        "session_id": session_id,
+        "count": len(results),
+        "results": results,
+    }
+
+
 @app.delete("/agent/{agent_id}")
 async def unregister_agent(agent_id: str):
     """Unregister an agent from the registry"""
@@ -513,7 +839,7 @@ async def update_agent_health(agent_id: str, status: str = "active"):
     if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
 
-    timestamp = datetime.now().isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
 
     return {"status": "ok", "timestamp": timestamp, "agent_status": status}
 

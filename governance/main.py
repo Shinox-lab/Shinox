@@ -1,12 +1,26 @@
 import asyncio
 import logging
 import os
+import sys
+from pythonjsonlogger.json import JsonFormatter
 from faststream import FastStream, Context
 from faststream.kafka import KafkaBroker
 from pydantic import BaseModel, Field
 from typing import Optional, Literal, Dict, Any
 from datetime import datetime, timezone
 import uuid
+
+# --- Structured JSON Logging ---
+_formatter = JsonFormatter(
+    fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+    rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
+    static_fields={"service": "governance"},
+)
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(_formatter)
+logging.root.handlers.clear()
+logging.root.addHandler(_handler)
+logging.root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
 # --- Configuration ---
 BROKER_URL = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:19092")

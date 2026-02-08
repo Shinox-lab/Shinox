@@ -5,4 +5,5 @@ description = "Governance Service for Agent Squad"
 dependencies = [
     "faststream[cli,kafka]",
     "pydantic",
+    "python-json-logger>=3.0.0",
 ]

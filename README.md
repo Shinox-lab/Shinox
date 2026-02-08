@@ -235,9 +235,9 @@ sequenceDiagram
 
 ## 5.1 Multi-Stage Task Context Management
 
-When tasks span multiple stages (e.g., Stage 1: gather data, Stage 2: summarize), agents in later stages need access to results from earlier stages. This section documents the current solution and planned enhancements.
+When tasks span multiple stages (e.g., Stage 1: gather data, Stage 2: summarize), agents in later stages need access to results from earlier stages. This section documents the multi-layered approach implemented.
 
-### Current Solution: Squad Lead Context Injection (v0.1)
+### Layer 1: Squad Lead Context Injection
 
 The Squad Lead agent automatically injects completed task results into subsequent stage assignments.
 
@@ -263,47 +263,486 @@ Stage 2 Task (with context injection):
 **Your Task:** Summarize the conversion result for the user
 ```
 
-**Limitations:**
-- Context is truncated at 2000 characters per result to avoid token explosion
-- All completed results are included, not just relevant ones
-- Workers cannot request additional context if needed
+### Layer 2: Agent History Tool (v0.2 - Implemented)
 
-### Future Enhancement: Agent History Tool (Planned v0.2)
+A flexible approach allowing agents to query session history on-demand. Works together with semantic wake-up for intelligent context retrieval.
 
-A more flexible approach allowing agents to query session history on-demand.
+#### API Endpoints (Agent Registry)
 
-**Proposed Design:**
-```python
-# New tool available to all agents
-@tool
-async def read_session_history(
-    session_id: str,
-    filter_agent: Optional[str] = None,
-    filter_type: Optional[str] = None,  # e.g., "TASK_RESULT"
-    limit: int = 10
-) -> List[dict]:
-    """Query the message history for the current session."""
-    # Query messages table filtered by session and criteria
-    ...
+```bash
+# Get full session history with filters
+GET /session/{session_id}/history
+    ?filter_agent=accounting-specialist-agent  # Optional
+    ?filter_type=TASK_RESULT                   # Optional
+    ?limit=50                                  # Max messages (default: 50)
+    ?offset=0                                  # For pagination
+
+# Get task results only (convenience endpoint)
+GET /session/{session_id}/results
+    ?limit=20
 ```
 
-**Wake-up Heuristics (NLP-based):**
-| Trigger Pattern | Action |
-|-----------------|--------|
-| "summarize", "combine", "based on" | Auto-invoke history tool |
-| "what did X say", "previous result" | Auto-invoke history tool |
+**Example response:**
+```json
+{
+  "session_id": "session.my_squad_123",
+  "total_count": 15,
+  "messages": [
+    {
+      "message_id": "abc123",
+      "source_agent_id": "accounting-specialist-agent",
+      "target_agent_id": "squad-lead-agent",
+      "interaction_type": "TASK_RESULT",
+      "content": "7 USD = 27.67 MYR (rate: 3.9525)",
+      "created_at": "2025-01-15T10:30:00Z"
+    }
+  ],
+  "has_more": false
+}
+```
+
+#### SDK Usage
+
+```python
+from shinox_agent.tools import (
+    AgentHistoryTool,
+    get_session_history,
+    get_session_results,
+    should_auto_fetch_history,
+)
+
+# 1. Direct function call
+results = await get_session_results(
+    session_id="session.my_squad_123",
+    registry_url="http://localhost:9000",
+)
+
+# 2. As a LangChain tool for agent brains
+tool = AgentHistoryTool(
+    registry_url="http://localhost:9000",
+    session_id="session.my_squad_123",
+)
+# Add to your agent's tools list
+
+# 3. Check if task needs history (heuristic)
+needs_history, patterns = should_auto_fetch_history("Summarize the results")
+# Returns: (True, ["summarize"])
+```
+
+### Layer 3: Auto-History Injection (Heuristic)
+
+Worker agents can automatically detect when a task needs history context and fetch it before brain invocation.
+
+**Trigger patterns detected:**
+| Pattern Category | Examples |
+|------------------|----------|
+| Summarization | "summarize", "combine", "consolidate", "aggregate", "merge" |
+| Reference | "based on", "previous", "earlier", "what did X say/report/find" |
+| Dependency | "using the data/result", "with the information" |
+
+**Configuration:**
+```python
+from shinox_agent import ShinoxWorkerAgent
+
+agent = ShinoxWorkerAgent(
+    agent_card=my_card,
+    brain=my_brain,
+    enable_auto_history=True,  # Enable auto-injection (default: True)
+)
+```
+
+**Environment variable:**
+```bash
+AUTO_HISTORY_INJECTION=true  # Default: true
+```
+
+**How it works:**
+1. Worker receives task assignment
+2. Heuristic patterns check the task instruction
+3. If patterns match → fetch session results from registry
+4. Inject results as context prefix to the message
+5. Invoke brain with enhanced context
+
+**Example auto-injection:**
+```
+Original task: "Summarize the conversion result"
+
+After auto-injection:
+---
+## Previous Results from Squad Members
+
+### accounting-specialist-agent
+7 USD = 27.67 MYR (rate: 3.9525)
+
+---
+
+**Your Task:** Summarize the conversion result
+```
+
+### Architecture Summary
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Context Layers                               │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 1: Squad Lead Context Injection (always on)              │
+│  - Automatic for Stage 2+ tasks                                 │
+│  - All completed results injected                               │
+│                                                                 │
+│  Layer 2: Agent History Tool (on-demand)                        │
+│  - Worker explicitly queries history                            │
+│  - Selective: filter by agent, type                             │
+│                                                                 │
+│  Layer 3: Auto-History Injection (heuristic)                    │
+│  - Automatic for tasks matching patterns                        │
+│  - Fetches results before brain invocation                      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### When to Use Each Layer
+
+| Scenario | Recommended Layer |
+|----------|-------------------|
+| Multi-stage squad tasks | Layer 1 (automatic) |
+| Task says "summarize", "combine" | Layer 3 (automatic) |
+| Agent needs specific agent's output | Layer 2 (tool call) |
+| Complex queries, filtering | Layer 2 (tool call) |
 | Simple direct tasks | No history needed |
 
-**Benefits over current approach:**
-- Agent-driven: Workers decide when they need context
-- Selective: Only fetch relevant history, not everything
-- Scalable: Works for complex multi-turn sessions
-- Flexible: Supports ad-hoc queries during execution
+---
 
-**Implementation considerations:**
-- Add MCP tool to agent SDK for history access
-- Implement smart caching to reduce database queries
-- Design permission model (agents can only read their session)
+## 5.2 Semantic Wake-up Pattern (Heuristic Agent Activation)
+
+Traditional keyword-based wake-up triggers are rigid and miss semantic matches (e.g., "exchange rate" should match an agent with "currency conversion" capability). This section documents the vector-based semantic wake-up pattern.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Agent Registry                              │
+│  - Generates embeddings on registration                         │
+│  - Stores: description_embedding, skill_embeddings[]            │
+│  - Endpoint: GET /agent/{id}/embeddings                         │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓ (on startup)
+┌─────────────────────────────────────────────────────────────────┐
+│                    ShinoxWorkerAgent                             │
+│  - Fetches capability embeddings from registry                  │
+│  - Caches embeddings locally                                    │
+│  - Computes message similarity using multi-vector max pooling   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### How It Works: Multi-Vector Max Pooling
+
+Instead of a single combined embedding, we use **per-skill embeddings** with max pooling:
+
+```python
+# Message: "convert 7 USD to MYR"
+#           ↓ embed
+# Compare against EACH skill individually:
+
+Skill: "currency"      → similarity: 0.52
+Skill: "exchange rates" → similarity: 0.61
+Skill: "conversion"     → similarity: 0.82  ← BEST MATCH!
+Skill: "invoice"        → similarity: 0.21
+
+# Also compare against description embedding
+Description → similarity: 0.58
+
+# Final score: max(0.82 * 1.1, 0.58) = 0.90
+# If score > threshold (0.65) → WAKE UP!
+```
+
+### Wake-up Decision Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Wake-up Decision Flow                      │
+├─────────────────────────────────────────────────────────────┤
+│  1. Explicit targeting? (target_id, @mention)  → WAKE       │
+│                         ↓ no                                 │
+│  2. TASK_ASSIGNMENT type?                      → WAKE       │
+│                         ↓ no                                 │
+│  3. BROADCAST_QUERY type?                                   │
+│     → Compute semantic similarity                            │
+│     → If score > threshold (0.65)              → WAKE       │
+│                         ↓ no                                 │
+│  4. Fallback to keyword triggers               → WAKE/IGNORE│
+│                         ↓ no match                           │
+│  5. Ignore message                                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Configuration
+
+```python
+from shinox_agent import ShinoxWorkerAgent
+
+agent = ShinoxWorkerAgent(
+    agent_card=my_card,
+    brain=my_brain,
+    enable_semantic_wake=True,   # Enable semantic matching
+    wake_threshold=0.65,         # Similarity threshold (0-1)
+    triggers=["keyword1"],       # Fallback keywords
+)
+```
+
+**Environment variables:**
+- `SEMANTIC_WAKE_THRESHOLD`: Default threshold (default: 0.65)
+- `EMBEDDING_MODEL`: Model name (default: sentence-transformers/all-MiniLM-L6-v2)
+
+### Database Schema
+
+```sql
+-- Description embedding on agents table
+ALTER TABLE agents ADD COLUMN description_embedding vector(384);
+
+-- Per-skill embeddings table
+CREATE TABLE agent_skill_embeddings (
+    agent_id VARCHAR(255) REFERENCES agents(agent_id),
+    skill_name VARCHAR(255),
+    skill_text VARCHAR(1000),
+    embedding vector(384),
+    PRIMARY KEY (agent_id, skill_name)
+);
+```
+
+### Installation
+
+```bash
+# Install SDK with semantic support
+pip install shinox-agent-sdk[semantic]
+
+# This adds: sentence-transformers, numpy
+```
+
+### Benefits
+
+| Aspect | Keyword Matching | Semantic Matching |
+|--------|------------------|-------------------|
+| "convert PDF" | Wakes accounting agent | Does NOT wake (different context) |
+| "exchange money" | Misses (no keyword) | Wakes accounting agent |
+| Accuracy | Low (false positives) | High (context-aware) |
+| Flexibility | Rigid | Adaptive |
+
+### Limitations
+
+- Initial model load takes ~2-5 seconds
+- Requires ~100MB memory for embedding model
+- Fallback to keywords if registry unavailable
+
+---
+
+## 5.3 Multi-Agent Coordination Protocol (Group Chat Semantics)
+
+This section documents the decentralized coordination patterns that enable agents to collaborate without always routing through the Squad Lead.
+
+### The Problem: Orchestration Bottleneck
+
+In the original architecture, all communication flows through the Squad Lead:
+
+```
+User → Squad Lead → Worker A → Squad Lead → Worker B → Squad Lead → User
+```
+
+This creates bottlenecks and doesn't support:
+- Agents helping each other directly
+- Emergent collaboration based on expertise
+- Group chat where anyone can contribute
+
+### The Solution: Choreographed Communication
+
+New interaction types enable peer-to-peer communication with semantic wake-up:
+
+```
+User → GROUP_QUERY → [All Agents]
+                         ↓
+              [Semantic Matching]
+                         ↓
+         Agent A (relevant) → Responds
+         Agent B (not relevant) → Observes
+         Agent C (relevant) → Responds
+```
+
+### New Interaction Types
+
+| Type | Producer | Use Case | Wake Behavior |
+|------|----------|----------|---------------|
+| `GROUP_QUERY` | User/Agent | Ask the group a question | Semantic match → wake |
+| `PEER_REQUEST` | Agent | Request help from capable peers | Semantic match → wake |
+| `EXPERTISE_OFFER` | Agent | Proactively offer expertise | Semantic match → wake |
+
+### Wake-up Decision Flow (Updated)
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Message Arrives                                  │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  1. Am I explicitly targeted? (target_id, @mention)                 │
+│     → YES: WAKE                                                     │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            ▼ NO
+┌─────────────────────────────────────────────────────────────────────┐
+│  2. Is this TASK_ASSIGNMENT or DIRECT_COMMAND?                      │
+│     → YES: WAKE                                                     │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            ▼ NO
+┌─────────────────────────────────────────────────────────────────────┐
+│  3. Is this GROUP_VISIBLE? (GROUP_QUERY, PEER_REQUEST, etc.)        │
+│     → Run semantic matching against my capabilities                 │
+│     → If score > threshold: WAKE                                    │
+│     → Else: OBSERVE (update context, don't invoke LLM)              │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            ▼ NO
+┌─────────────────────────────────────────────────────────────────────┐
+│  4. Is this OBSERVE_ONLY? (INFO_UPDATE, TASK_RESULT)                │
+│     → OBSERVE (update context for future reference)                 │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            ▼ NO
+┌─────────────────────────────────────────────────────────────────────┐
+│  5. IGNORE (not relevant)                                           │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### SDK Usage: Peer Communication
+
+```python
+from shinox_agent import ShinoxWorkerAgent
+
+agent = ShinoxWorkerAgent(
+    agent_card=my_card,
+    brain=my_brain,
+    enable_semantic_wake=True,
+)
+
+# 1. Ask the group a question (anyone relevant can answer)
+await agent.broadcast_query(
+    "What's the current exchange rate for USD to MYR?",
+    conversation_id=session_id,
+)
+
+# 2. Request help from peers (with optional preferences)
+await agent.request_peer_help(
+    "I need help designing a PostgreSQL schema for user auth",
+    conversation_id=session_id,
+    preferred_agents=["database-agent"],  # Optional hint
+)
+
+# 3. Proactively offer expertise
+await agent.offer_expertise(
+    "I notice you're discussing auth. I can help with OAuth2 implementation.",
+    conversation_id=session_id,
+)
+```
+
+### Example: Collaborative Problem Solving
+
+```
+1. Squad Lead assigns task to coder-agent:
+   TASK_ASSIGNMENT: "Build user login API"
+
+2. coder-agent gets stuck, asks for help:
+   PEER_REQUEST: "Need help with PostgreSQL connection pooling"
+
+3. Agents evaluate via semantic matching:
+   - database-agent: score=0.91 → WAKES → "Use pgbouncer with..."
+   - security-agent: score=0.78 → WAKES → "Also add rate limiting..."
+   - accounting-agent: score=0.12 → IGNORES
+
+4. coder-agent integrates contributions from both experts
+
+5. No Squad Lead bottleneck - direct peer collaboration!
+```
+
+### Context Observation
+
+Even when not waking, agents observe messages to build context:
+
+```python
+# Worker tracks conversation context per session
+context = agent.get_conversation_context(session_id)
+
+# Recent observed messages (for context awareness)
+recent = agent.get_recent_messages(session_id, limit=10)
+
+# Check participation status
+print(f"Has contributed: {context.has_contributed}")
+print(f"Interacted with: {context.interacted_with}")
+```
+
+### Configuration
+
+```python
+from shinox_agent import ShinoxWorkerAgent
+
+agent = ShinoxWorkerAgent(
+    agent_card=my_card,
+    brain=my_brain,
+    # Semantic wake-up settings
+    enable_semantic_wake=True,
+    wake_threshold=0.65,
+    # Context tracking
+    context_window_size=50,  # Messages to keep per session
+)
+```
+
+**Environment variables:**
+```bash
+SEMANTIC_WAKE_THRESHOLD=0.65    # Min similarity to wake
+CONTEXT_WINDOW_SIZE=50          # Messages to track per session
+```
+
+### Integration with Agent History Tool
+
+The Multi-Agent Coordination Protocol works seamlessly with the Agent History Tool:
+
+```
+1. Agent wakes via semantic matching (GROUP_QUERY)
+2. Auto-history detects task needs context ("summarize", "combine")
+3. Agent History Tool fetches relevant previous results
+4. Context injected before brain invocation
+5. Agent responds with full context awareness
+```
+
+### Architecture Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Communication Patterns                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  ORCHESTRATED (via Squad Lead)          CHOREOGRAPHED (P2P)         │
+│  ─────────────────────────────          ───────────────────         │
+│  TASK_ASSIGNMENT                        GROUP_QUERY                 │
+│  DIRECT_COMMAND                         PEER_REQUEST                │
+│  SESSION_BRIEFING                       EXPERTISE_OFFER             │
+│                                                                      │
+│  ┌─────────┐                            ┌─────────┐                 │
+│  │  Squad  │                            │  Agent  │                 │
+│  │  Lead   │                            │    A    │                 │
+│  └────┬────┘                            └────┬────┘                 │
+│       │                                      │                      │
+│       ▼                                      ▼                      │
+│  ┌─────────┐                       ┌─────────────────┐              │
+│  │ Worker  │                       │   All Agents    │              │
+│  │ Agent   │                       │ (semantic match)│              │
+│  └─────────┘                       └─────────────────┘              │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Benefits
+
+| Aspect | Before (Orchestrated) | After (Choreographed) |
+|--------|----------------------|----------------------|
+| Latency | High (via Squad Lead) | Low (direct P2P) |
+| Bottleneck | Squad Lead | None |
+| Expertise | Assigned | Emergent |
+| Collaboration | Sequential | Parallel |
+| Context | Injected | Self-gathered |
 
 ---
 

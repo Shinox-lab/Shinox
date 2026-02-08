@@ -1,7 +1,7 @@
 [project]
-name = "general-fast-agent"
+name = "philosopher-agent"
 version = "0.1.0"
-description = "Generalist Simple Logic Agent for Shinox mesh"
+description = "Wise Philosopher Agent for Shinox mesh"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

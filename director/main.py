@@ -22,8 +22,19 @@ OPENAI_BASE_URL = 'https://openrouter.ai/api/v1'
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL_NAME = "nvidia/nemotron-3-nano-30b-a3b:free"  # Use a smart model for orchestration
 
-# --- LOGGING ---
-logging.basicConfig(level=logging.INFO)
+# --- STRUCTURED JSON LOGGING ---
+import sys
+from pythonjsonlogger.json import JsonFormatter
+_formatter = JsonFormatter(
+    fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+    rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
+    static_fields={"service": "director"},
+)
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(_formatter)
+logging.root.handlers.clear()
+logging.root.addHandler(_handler)
+logging.root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("Director")
 
 # --- GLOBAL STATE ---

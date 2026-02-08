@@ -16,7 +16,7 @@ import (
 func main() {
 	// Configure zerolog
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
 
 	log.Info().Msg("Starting Kafka2DB Ingestion Service")
 
