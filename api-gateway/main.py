@@ -366,7 +366,7 @@ async def get_squad_messages(
             m.governance_status, m.governance_reason, m.metadata, m.created_at
         FROM messages m
         WHERE m.conversation_id = $1
-        ORDER BY m.created_at ASC
+        ORDER BY m.kafka_offset ASC
         LIMIT $2 OFFSET $3
     """
     rows = await db_pool.fetch(query, squad_id, limit, offset)

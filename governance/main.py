@@ -5,7 +5,7 @@ from faststream import FastStream, Context
 from faststream.kafka import KafkaBroker
 from pydantic import BaseModel, Field
 from typing import Optional, Literal, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 # --- Configuration ---
@@ -101,8 +101,12 @@ async def governance_router(msg: Dict[str, Any], logger=Context(), message=Conte
         outbound_headers[str_key] = str_value
     
     outbound_headers["x-governance-status"] = "VERIFIED"
-    outbound_headers["x-verified-at"] = datetime.now().isoformat()
-    
+    outbound_headers["x-verified-at"] = datetime.now(timezone.utc).isoformat()
+
+    # Also stamp the message payload so kafka2db persists the correct status
+    if isinstance(msg.get("headers"), dict):
+        msg["headers"]["governance_status"] = "VERIFIED"
+
     # 4. ARCHIVE TO GLOBAL EVENTS (Replay Capability)
     # Create a standardized event record for permanent storage
     interaction_type_raw = kafka_headers.get("x-interaction-type", b"MESSAGE")
@@ -123,7 +127,7 @@ async def governance_router(msg: Dict[str, Any], logger=Context(), message=Conte
     global_event = GlobalEventRecord(
         event_id=msg.get("id", str(uuid.uuid4())),
         event_type=event_type,
-        timestamp=msg.get("timestamp", datetime.now().isoformat()),
+        timestamp=msg.get("timestamp", datetime.now(timezone.utc).isoformat()),
         source_agent_id=source_agent,
         session_id=conversation_id,
         causation_id=msg.get("causation_id"),  # Track what caused this event
@@ -131,7 +135,7 @@ async def governance_router(msg: Dict[str, Any], logger=Context(), message=Conte
         payload=msg,  # Full original message for replay
         metadata={
             "destinations": dest_topics,
-            "validated_at": datetime.now().isoformat(),
+            "validated_at": datetime.now(timezone.utc).isoformat(),
             "governance_status": "VERIFIED",
             "original_headers": {k: v for k, v in outbound_headers.items()}
         }
