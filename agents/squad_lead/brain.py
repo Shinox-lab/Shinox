@@ -19,7 +19,7 @@ OPENAI_MODEL_NAME = "nvidia/nemotron-3-nano-30b-a3b:free"
 class SquadState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
     plan: List[List[str]]
-    assignments: Dict[str, str]
+    assignments: Dict[str, List[str]]  # agent_id -> list of task strings (supports multiple tasks per agent)
     available_squad_agents: List[str]
     squad_status: Literal["IDLE", "PLANNING", "EXECUTING", "BLOCKED", "DONE", "UPDATING"]
     next_actions: List[Dict[str, str]]
@@ -66,8 +66,8 @@ def node_planner(state: SquadState):
 
     GOAL: Break down the user's request into a sequence of STAGES.
 
-    AVAILABLE AGENTS:
-    {state['available_squad_agents']}
+    AVAILABLE AGENTS (format: "agent-id: description of capabilities"):
+    {chr(10).join('- ' + a for a in state['available_squad_agents'])}
 
     CURRENT PLAN: {state.get('plan', [])}
     LATEST REQUEST: {state['messages'][-1].content}
@@ -75,9 +75,14 @@ def node_planner(state: SquadState):
     CRITICAL RULES:
     1. You are ONLY a coordinator - NEVER assign tasks to yourself (squad-lead-agent).
     2. Delegate ALL work to the available worker agents.
-    3. For summarizing/combining results, use generalist-simple-logic-agent.
-    4. Tasks in the same STAGE run in PARALLEL.
-    5. Tasks in later stages depend on earlier stages.
+    3. MATCH each task to the agent whose DESCRIPTION best fits that task.
+       - Currency/math/finance tasks → agent with accounting/finance in description
+       - General knowledge/facts/geography → agent with generalist/general-purpose in description
+       - Summarizing/combining multiple results → generalist agent
+    4. If NO specialist matches a task, assign it to the generalist agent.
+    5. Tasks in the same STAGE run in PARALLEL.
+    6. Tasks in later stages depend on earlier stages.
+    7. Use ONLY the exact agent-id from the list above (the part before the colon).
 
     FORMAT:
     STAGE
@@ -145,12 +150,17 @@ def node_executor(state: SquadState):
             context_lines.append(f"### {agent_id}:\n{truncated}\n")
         context_block = "\n".join(context_lines) + "\n---\n\n"
 
+    # Track which tasks in this stage are already assigned (by full task string)
+    already_assigned_tasks = set()
+    for task_list in assignments.values():
+        already_assigned_tasks.update(task_list)
+
     for task in current_stage:
         if ":" in task:
             target_id, instruction = task.split(":", 1)
             target_id = target_id.strip()
 
-            if target_id not in assignments:
+            if task not in already_assigned_tasks:
                 # Inject context for tasks that likely need it (summarize, combine, etc.)
                 final_instruction = instruction.strip()
                 if context_block:
@@ -160,7 +170,10 @@ def node_executor(state: SquadState):
                     "target": target_id,
                     "instruction": final_instruction
                 })
-                new_assignments[target_id] = task
+                # Append to the agent's task list (supports multiple tasks per agent)
+                if target_id not in new_assignments:
+                    new_assignments[target_id] = []
+                new_assignments[target_id].append(task)
 
     result = {
         "next_actions": new_actions,
@@ -169,6 +182,27 @@ def node_executor(state: SquadState):
     }
 
     return result
+
+
+def _detect_task_failure(result_content: str) -> bool:
+    """Detect whether a task result indicates failure or inability to complete."""
+    failure_indicators = [
+        "having difficulty with a task",
+        "i cannot help",
+        "outside my capabilities",
+        "i'm unable to",
+        "i am unable to",
+        "i don't have the ability",
+        "not within my expertise",
+        "beyond my scope",
+        "i can only assist with",
+        "i'm not able to",
+        "i am not able to",
+        "cannot assist with that",
+        "not equipped to handle",
+    ]
+    content_lower = result_content.lower()
+    return any(indicator in content_lower for indicator in failure_indicators)
 
 
 def node_updater(state: SquadState):
@@ -186,32 +220,53 @@ def node_updater(state: SquadState):
     completed_results = state.get('completed_results', {}).copy()
     available_agents = state.get('available_squad_agents', [])
 
-    # --- Help Request Detection: Re-delegate to a fallback agent ---
-    if "having difficulty with a task" in result_content:
-        # Find the stuck agent's original task
-        original_task = assignments.get(source_agent)
+    # --- Help Request / Failure Detection: Re-delegate to a fallback agent ---
+    if _detect_task_failure(result_content):
+        agent_tasks = assignments.get(source_agent, [])
 
-        if original_task and plan:
-            # Remove stuck agent from assignments
+        # Identify which specific task failed — match against the result content
+        # The failed task is the one whose instruction appears in the failure message,
+        # or if we can't tell, take the first assigned task
+        failed_task = None
+        for task in agent_tasks:
+            task_instruction = task.split(":", 1)[1].strip() if ":" in task else task
+            # Check if the original task instruction is referenced in the response
+            if task_instruction.lower()[:40] in result_content.lower():
+                failed_task = task
+                break
+        if not failed_task and agent_tasks:
+            failed_task = agent_tasks[0]  # Default to first task
+
+        if failed_task and plan:
+            # Remove only the failed task from assignments (keep other tasks for this agent)
             if source_agent in assignments:
-                del assignments[source_agent]
+                assignments[source_agent] = [t for t in assignments[source_agent] if t != failed_task]
+                if not assignments[source_agent]:
+                    del assignments[source_agent]
 
-            # Find a fallback agent (first available that isn't the stuck one)
+            # Find a fallback agent — prefer generalist since the specialist failed
             fallback_agent = None
+            candidates = []
             for agent_entry in available_agents:
                 agent_id = agent_entry.split(":")[0].strip() if ":" in agent_entry else agent_entry.strip()
                 if agent_id != source_agent and agent_id != "squad-lead-agent":
-                    fallback_agent = agent_id
+                    candidates.append(agent_id)
+            # Prefer generalist for re-delegation (specialist already failed)
+            for c in candidates:
+                if "generalist" in c:
+                    fallback_agent = c
                     break
+            if not fallback_agent and candidates:
+                fallback_agent = candidates[0]
 
             if fallback_agent:
                 # Extract instruction from original task
-                instruction = original_task.split(":", 1)[1].strip() if ":" in original_task else original_task
+                instruction = failed_task.split(":", 1)[1].strip() if ":" in failed_task else failed_task
                 new_task = f"{fallback_agent}: {instruction}"
 
-                # Rebuild the current stage with the fallback agent
+                # Rebuild the current stage: remove only the failed task, add the re-delegated one
                 current_stage = plan[0]
-                new_stage = [t for t in current_stage if not t.startswith(f"{source_agent}:")]
+                new_stage = [t for t in current_stage if t != failed_task]
                 new_stage.append(new_task)
                 new_plan = [new_stage] + plan[1:]
 
@@ -222,7 +277,7 @@ def node_updater(state: SquadState):
                     "completed_results": completed_results,
                 }
 
-        # Fallback: no original task found or no plan, just continue
+        # Fallback: no failed task found or no plan, just continue
         return {
             "assignments": assignments,
             "squad_status": "EXECUTING",
@@ -234,11 +289,16 @@ def node_updater(state: SquadState):
     # Store the completed result for context injection
     completed_results[source_agent] = result_content
 
-    # Remove from assignments
+    # Remove from assignments — remove ONE task for this agent (the completed one)
     if source_agent in assignments:
-        del assignments[source_agent]
+        agent_tasks = assignments[source_agent]
+        if len(agent_tasks) > 1:
+            # Multiple tasks — remove just the first (completed) one, keep the rest
+            assignments[source_agent] = agent_tasks[1:]
+        else:
+            del assignments[source_agent]
 
-    # Remove from plan
+    # Remove from plan — remove only this agent's completed task from the current stage
     result = {
         "assignments": assignments,
         "squad_status": "EXECUTING",
@@ -247,7 +307,14 @@ def node_updater(state: SquadState):
 
     if plan:
         current_stage = plan[0]
-        new_stage = [t for t in current_stage if not t.startswith(f"{source_agent}:")]
+        # Remove one task for this agent from the stage
+        removed = False
+        new_stage = []
+        for t in current_stage:
+            if not removed and t.startswith(f"{source_agent}:"):
+                removed = True  # Remove only the first matching task
+                continue
+            new_stage.append(t)
 
         if not new_stage:
             new_plan = plan[1:]

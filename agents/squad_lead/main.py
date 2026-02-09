@@ -208,8 +208,23 @@ async def session_event_handler(msg: AgentMessage, agent: ShinoxAgent):
             )
             return
 
-    # Passive Memory Update
-    lc_msg = HumanMessage(content=msg.content, name=headers.source_agent_id)
+    # Passive Memory Update — enrich low-confidence TASK_RESULT with failure hint
+    # so the brain's node_updater detects it as a failure even if content phrasing varies
+    msg_content = msg.content
+    if headers.interaction_type == "TASK_RESULT":
+        confidence = msg.metadata.get("confidence")
+        if confidence is not None and confidence < 0.4:
+            msg_content = (
+                f"{msg.content}\n\n"
+                f"[SYSTEM NOTE: This agent is having difficulty with a task. "
+                f"Confidence: {confidence}. Consider re-delegating to another agent.]"
+            )
+            logger.info(
+                f"[{my_id}] Low-confidence TASK_RESULT from {headers.source_agent_id} "
+                f"(confidence={confidence}), injecting failure hint"
+            )
+
+    lc_msg = HumanMessage(content=msg_content, name=headers.source_agent_id)
 
     # Active Trigger Check
     should_wake_up = False
@@ -258,7 +273,15 @@ async def session_event_handler(msg: AgentMessage, agent: ShinoxAgent):
 
     # 2. Check for Briefing with Roster from Director
     if headers.interaction_type == "SESSION_BRIEFING" and msg.metadata.get("squad_members"):
-        squad_agents = msg.metadata["squad_members"]
+        # Director sends bare IDs — enrich with descriptions from registry
+        # so the planner LLM knows each agent's capabilities
+        briefing_ids = set(msg.metadata["squad_members"])
+        all_agents = await agent.fetch_available_agents(exclude_self=False)
+        squad_agents = [a for a in all_agents if a.split(":")[0].strip() in briefing_ids]
+        # Include any briefing IDs not found in registry (shouldn't happen, but safe)
+        found_ids = {a.split(":")[0].strip() for a in squad_agents}
+        for aid in briefing_ids - found_ids:
+            squad_agents.append(aid)
 
     # 3. Use existing state if available
     elif existing_agents:
