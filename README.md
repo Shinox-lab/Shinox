@@ -996,6 +996,7 @@ Evolve HITL from simple approve/reject to rich collaborative workflows that maxi
 | [ ] | **HITL-007** | **HITL Analytics & Optimization** | Track: approval rates by agent/action type, review time distribution, rejection reasons, reviewer accuracy (based on outcome). Identify bottlenecks and training opportunities. Generate insights like "Agent X's code reviews are rejected 40% - needs retraining." | P1 | Medium | Process improvement; cost reduction |
 | [ ] | **HITL-008** | **Mobile HITL App** | Native iOS/Android app for reviewing HITL requests on-the-go. Push notifications for urgent approvals. Implement biometric authentication and offline queue sync. | P2 | Medium | Reviewer convenience; faster response |
 | [ ] | **HITL-009** | **Voice-Based Approval Interface** | Allow verbal approvals via voice assistants: "Hey Shinox, approve the deployment request from Squad Alpha." Implement voice biometrics for authentication and natural language command parsing. | P3 | Medium | Accessibility; hands-free operation |
+| [ ] | **HITL-010** | **Human Halt / Emergency Stop via HITL** | Allow humans to halt any running agent or squad mid-execution via the HITL dashboard. Integrates with `sys.governance.signals` kill switch. Includes confirmation flow, state serialization before halt, and resumption capability. | P0 | Medium | Safety-critical; operational control |
 
 ---
 
@@ -1072,7 +1073,7 @@ Build production-grade reliability for enterprise deployments.
 | [ ] | **REL-003** | **Intelligent Retry with Backoff** | Context-aware retry policies. Distinguish transient failures (retry) from permanent failures (fail fast). Implement exponential backoff with jitter. Track retry budgets to prevent thundering herds. | P0 | Low | Reliability; efficiency |
 | [ ] | **REL-004** | **Multi-Region Deployment** | Active-active deployment across regions. Implement global load balancing, data replication, and failover automation. Target: 99.95% availability SLA with <5 minute RTO. | P1 | Very High | Enterprise requirement; disaster recovery |
 | [ ] | **REL-005** | **Graceful Degradation Modes** | Define degradation levels: (1) Full capability, (2) Reduced agents (core only), (3) Read-only mode, (4) Maintenance mode. Automatic mode transitions based on health. Communicate status to users. | P1 | Medium | User experience during incidents |
-| [ ] | **REL-006** | **State Checkpointing & Recovery** | Periodic agent state snapshots to durable storage. On crash, restore from checkpoint rather than replaying entire history. Implement incremental checkpoints for efficiency. Target: <30 second recovery time. | P0 | Medium | Reliability; faster recovery |
+| [x] | **REL-006** | **State Checkpointing & Recovery** | ✅ **IMPLEMENTED** - Squad Lead agent state persistence: (1) PostgreSQL-backed assignment tracking (`squad_assignments` table) replaces in-memory dict, (2) LangGraph checkpoints via `AsyncPostgresSaver` enable mid-mission crash recovery, (3) Stage index tracking (`current_stage_index`) with completion announcements, (4) Server-side timeout monitoring survives restarts. Graceful degradation when DATABASE_URL not set. | P0 | Medium | Reliability; faster recovery |
 | [ ] | **REL-007** | **Message Delivery Guarantees** | Implement exactly-once semantics for critical messages. Use idempotency keys and transactional outbox pattern. Audit message delivery with acknowledgments. Zero message loss SLA. | P0 | High | Data integrity; trust |
 | [ ] | **REL-008** | **Health Monitoring & Alerting** | Deep health checks: LLM response quality, tool success rates, memory usage, queue depths. Implement anomaly detection for early warning. PagerDuty/OpsGenie integration with intelligent alert routing. | P0 | Medium | Operations; proactive issue detection |
 | [ ] | **REL-009** | **Capacity Planning & Auto-Scaling** | Predictive scaling based on historical patterns and leading indicators. Implement scale-to-zero for cost savings. Reserve capacity for burst handling. Target: maintain <2 second response time at 10x normal load. | P1 | Medium | Cost efficiency; performance |
@@ -1158,7 +1159,21 @@ Connect Shinox with the tools and platforms teams already use.
 
 ---
 
-### 8.13 Roadmap Prioritization Matrix
+### 8.13 Agentic RAG & Knowledge Management
+
+Build intelligent knowledge retrieval and curation capabilities that enable agents to learn from documents, past sessions, and human-curated knowledge.
+
+| status | ID | Feature | Description | Priority | Complexity | Business Value |
+|:---|:---|:--------|:------------|:---------|:-----------|:---------------|
+| [ ] | **RAG-001** | **Agentic RAG Engine (RagFlow Integration)** | Deploy RagFlow (or equivalent) as the RAG backbone. Agents can ingest documents, query knowledge bases, and get retrieval-augmented answers. Consumed via `sys.rag.ingest` topic. RAG Agent becomes a first-class squad member that handles knowledge queries. Supports chunking strategies, hybrid search (dense + sparse), and re-ranking. | P0 | High | Core intelligence; reduces hallucinations; enterprise knowledge access |
+| [ ] | **RAG-002** | **Knowledge HITL (Human Curation)** | Humans can review, correct, and annotate RAG retrieval results before agents contribute them to the knowledge base. Feeds corrections back as training signal for retrieval quality optimization (ties to RL-003). Integrates with `sys.approvals.request` topic for approval workflows. | P0 | Medium | Knowledge quality; trust; training signal |
+| [ ] | **RAG-003** | **Session Knowledge Persistence** | Automatically index squad session outputs (task results, decisions, code artifacts) into the RAG system for future squads to reference. Cross-session learning without full RL pipeline. Implements deduplication, relevance scoring, and TTL-based expiry for stale knowledge. | P1 | Medium | Organizational memory; cross-squad learning |
+| [ ] | **RAG-004** | **Multi-Source Knowledge Ingestion** | Support ingestion from: Confluence, GitHub repos, Slack history, uploaded PDFs, web crawls. Chunking strategies per source type (code-aware, markdown-aware, PDF layout-aware). Deduplication and freshness tracking with automatic re-indexing on source updates. | P1 | High | Enterprise integration; comprehensive knowledge |
+| [ ] | **RAG-005** | **RAG Quality Feedback Loop** | Track which retrieved documents agents actually used vs ignored. Collect implicit signals (document was cited in output) and explicit signals (human rated retrieval quality). Feed into embedding fine-tuning and re-ranker optimization. Ties to RL-003. | P2 | Medium | Continuous improvement; retrieval precision |
+
+---
+
+### 8.14 Roadmap Prioritization Matrix
 
 | status | Priority | Timeline | Focus Areas | Key Milestones |
 |:---|:---------|:---------|:------------|:---------------|
@@ -1169,7 +1184,7 @@ Connect Shinox with the tools and platforms teams already use.
 
 ---
 
-### 8.14 Success Metrics by Phase
+### 8.15 Success Metrics by Phase
 
 | status | Phase | Technical Metrics | Business Metrics | User Metrics |
 |:---|:------|:-----------------|:-----------------|:-------------|

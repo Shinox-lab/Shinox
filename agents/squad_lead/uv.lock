@@ -813,6 +813,15 @@ wheels = [
 ]
 
 [[package]]
+name = "python-json-logger"
+version = "4.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/bf/eca6a3d43db1dae7070f70e160ab20b807627ba953663ba07928cdd3dc58/python_json_logger-4.0.0.tar.gz", hash = "sha256:f58e68eb46e1faed27e0f574a55a0455eecd7b8a5b88b85a784519ba3cff047f", size = 17683, upload-time = "2025-10-06T04:15:18.984Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/51/e5/fecf13f06e5e5f67e8837d777d1bc43fac0ed2b77a676804df5c34744727/python_json_logger-4.0.0-py3-none-any.whl", hash = "sha256:af09c9daf6a813aa4cc7180395f50f2a9e5fa056034c9953aec92e381c5ba1e2", size = 15548, upload-time = "2025-10-06T04:15:17.553Z" },
+]
+
+[[package]]
 name = "pyyaml"
 version = "6.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1009,26 +1018,18 @@ wheels = [
 
 [[package]]
 name = "shinox-agent-sdk"
-version = "0.1.0"
-source = { editable = "../../../shinox-agent-sdk" }
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "faststream", extra = ["kafka"] },
     { name = "httpx" },
     { name = "pydantic" },
+    { name = "python-json-logger" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "faststream", extras = ["kafka"], specifier = ">=0.5.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.2.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
-    { name = "shinox-agent-sdk", extras = ["langchain", "dev"], marker = "extra == 'all'" },
+sdist = { url = "https://files.pythonhosted.org/packages/2b/df/083a3fae85dab6ee996e32ca99b8d2c07929eb3a741f38c0a2685aa72c8d/shinox_agent_sdk-0.1.1.tar.gz", hash = "sha256:7d27b6edbac10a386e08e21c8c26bea664585a6ae5e3d51acdd4f3265517a356", size = 24929, upload-time = "2026-02-08T17:16:57.406Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2b/e9/cc535f2a68f4957d736aaface56e4b1dc8cbe76f05307391e8bb37343962/shinox_agent_sdk-0.1.1-py3-none-any.whl", hash = "sha256:b699c1f758f41058a8b57a4c099e4ca6de306498dcf97519e4d94be0408b6633", size = 29009, upload-time = "2026-02-08T17:16:56.24Z" },
 ]
-provides-extras = ["langchain", "dev", "all"]
 
 [[package]]
 name = "sniffio"
@@ -1063,7 +1064,7 @@ requires-dist = [
     { name = "langchain-openai", specifier = ">=1.1.6" },
     { name = "langgraph", specifier = ">=1.0.5" },
     { name = "pydantic", specifier = ">=2.12.5" },
-    { name = "shinox-agent-sdk", editable = "../../../shinox-agent-sdk" },
+    { name = "shinox-agent-sdk", specifier = ">=0.1.1" },
 ]
 
 [[package]]
