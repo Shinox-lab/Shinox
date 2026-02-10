@@ -1,7 +1,7 @@
+import logging
 import operator
 import os
-import time
-from typing import Annotated, List, TypedDict, Dict, Literal, Optional
+from typing import Annotated, List, TypedDict, Dict, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import SystemMessage, BaseMessage
@@ -9,6 +9,8 @@ from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -25,6 +27,7 @@ class SquadState(TypedDict):
     next_actions: List[Dict[str, str]]
     # Track completed task results for context injection into subsequent stages
     completed_results: Dict[str, str]  # agent_id -> result content
+    current_stage_index: int
 
 
 # --- 2. LLM Instance ---
@@ -119,8 +122,8 @@ def node_planner(state: SquadState):
     if current_stage:
         new_plan.append(current_stage)
 
-    result = {"plan": new_plan, "squad_status": "EXECUTING"}
-    
+    result = {"plan": new_plan, "squad_status": "EXECUTING", "current_stage_index": 0}
+
     return result
 
 
@@ -132,9 +135,14 @@ def node_executor(state: SquadState):
     plan = state.get('plan', [])
     assignments = state.get('assignments', {})
     completed_results = state.get('completed_results', {})
+    current_stage_index = state.get("current_stage_index", 0)
 
     if not plan:
-        return {"next_actions": [], "squad_status": "DONE"}
+        return {
+            "next_actions": [],
+            "squad_status": "DONE",
+            "current_stage_index": current_stage_index,
+        }
 
     current_stage = plan[0]
     new_actions = []
@@ -178,7 +186,8 @@ def node_executor(state: SquadState):
     result = {
         "next_actions": new_actions,
         "assignments": new_assignments,
-        "squad_status": "EXECUTING"
+        "squad_status": "EXECUTING",
+        "current_stage_index": current_stage_index,
     }
 
     return result
@@ -219,6 +228,7 @@ def node_updater(state: SquadState):
     plan = state.get('plan', [])
     completed_results = state.get('completed_results', {}).copy()
     available_agents = state.get('available_squad_agents', [])
+    current_stage_index = state.get("current_stage_index", 0)
 
     # --- Help Request / Failure Detection: Re-delegate to a fallback agent ---
     if _detect_task_failure(result_content):
@@ -275,6 +285,7 @@ def node_updater(state: SquadState):
                     "plan": new_plan,
                     "squad_status": "EXECUTING",
                     "completed_results": completed_results,
+                    "current_stage_index": current_stage_index,
                 }
 
         # Fallback: no failed task found or no plan, just continue
@@ -282,6 +293,7 @@ def node_updater(state: SquadState):
             "assignments": assignments,
             "squad_status": "EXECUTING",
             "completed_results": completed_results,
+            "current_stage_index": current_stage_index,
         }
 
     # --- Normal update: task completed successfully ---
@@ -302,7 +314,8 @@ def node_updater(state: SquadState):
     result = {
         "assignments": assignments,
         "squad_status": "EXECUTING",
-        "completed_results": completed_results
+        "completed_results": completed_results,
+        "current_stage_index": current_stage_index,
     }
 
     if plan:
@@ -317,7 +330,9 @@ def node_updater(state: SquadState):
             new_stage.append(t)
 
         if not new_stage:
+            # Stage completed — advance to next stage
             new_plan = plan[1:]
+            result["current_stage_index"] = current_stage_index + 1
         else:
             new_plan = [new_stage] + plan[1:]
 
@@ -345,19 +360,42 @@ def router(state: SquadState):
 
 # --- 6. Build the Graph ---
 
-workflow = StateGraph(SquadState)
+def _build_workflow() -> StateGraph:
+    """Construct the LangGraph workflow (without compiling)."""
+    wf = StateGraph(SquadState)
 
-workflow.add_node("monitor", node_monitor)
-workflow.add_node("planner", node_planner)
-workflow.add_node("updater", node_updater)
-workflow.add_node("executor", node_executor)
+    wf.add_node("monitor", node_monitor)
+    wf.add_node("planner", node_planner)
+    wf.add_node("updater", node_updater)
+    wf.add_node("executor", node_executor)
 
-workflow.set_entry_point("monitor")
+    wf.set_entry_point("monitor")
 
-workflow.add_conditional_edges("monitor", router)
-workflow.add_edge("planner", "executor")
-workflow.add_edge("updater", "executor")
-workflow.add_edge("executor", END)
+    wf.add_conditional_edges("monitor", router)
+    wf.add_edge("planner", "executor")
+    wf.add_edge("updater", "executor")
+    wf.add_edge("executor", END)
 
-# Compile with persistence
-brain = workflow.compile(checkpointer=MemorySaver())
+    return wf
+
+
+# Default compile with MemorySaver (backward compatible — works without Postgres)
+brain = _build_workflow().compile(checkpointer=MemorySaver())
+
+
+async def initialize_persistent_brain(database_url: str) -> None:
+    """Re-compile the brain with a PostgreSQL-backed checkpointer.
+
+    This replaces the module-level ``brain`` variable so that every
+    call-site that accesses ``brain_module.brain`` picks up the new
+    persistent graph.
+    """
+    global brain
+
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    checkpointer = AsyncPostgresSaver.from_conn_string(database_url)
+    await checkpointer.setup()  # auto-creates checkpoint tables if missing
+
+    brain = _build_workflow().compile(checkpointer=checkpointer)
+    logger.info("Brain re-compiled with PostgreSQL checkpointer")

@@ -9,12 +9,12 @@ Uses the Shinox Agent SDK with custom session handler for complex orchestration.
 import asyncio
 import logging
 import os
-import time
-from typing import Dict, Optional
+from typing import Optional
 
 from langchain_core.messages import HumanMessage
 from shinox_agent import ShinoxAgent, AgentMessage, A2AHeaders
-from brain import brain
+import brain as brain_module
+from assignment_store import AssignmentStore
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
@@ -23,12 +23,14 @@ from a2a.types import (
 
 logger = logging.getLogger(__name__)
 
-# --- Assignment Tracking for Timeout Monitoring ---
-# Structure: {conversation_id: {agent_id: {"assigned_at": float, "instruction": str, "check_sent": bool}}}
-_assignment_tracker: Dict[str, Dict[str, Dict]] = {}
+# --- Configuration ---
+DATABASE_URL = os.getenv("DATABASE_URL")
 TASK_TIMEOUT_SECONDS = int(os.getenv("SQUAD_TASK_TIMEOUT", "120"))
 CHECK_INTERVAL_SECONDS = int(os.getenv("SQUAD_CHECK_INTERVAL", "30"))
 COLLABORATION_GRACE_SECONDS = int(os.getenv("SQUAD_COLLABORATION_GRACE", "90"))
+
+# --- Persistent state (initialised at startup when DATABASE_URL is set) ---
+_assignment_store: Optional[AssignmentStore] = None
 _monitor_task: Optional[asyncio.Task] = None
 
 # --- Agent Definition ---
@@ -83,12 +85,21 @@ async def handle_brain_output(final_state: dict, initial_status: str, headers: A
     current_plan = final_state.get("plan", [])
     next_actions = final_state.get("next_actions", [])
     conversation_id = headers.conversation_id
+    current_stage_index = final_state.get("current_stage_index", 0)
 
     # 1. Announce New Plan
     if initial_status != "UPDATING" and squad_status == "EXECUTING" and current_plan:
         plan_str = "\n".join([f"- Stage {i + 1}: {stage}" for i, stage in enumerate(current_plan)])
         content = f"**Plan Formulated**\n\nI have analyzed the mission and created the following execution plan:\n\n{plan_str}\n\nProceeding with execution..."
         await agent.publish_update(content, conversation_id, "INFO_UPDATE")
+
+    # 1b. Announce stage completion when advancing to a new stage
+    if current_stage_index > 0 and next_actions and initial_status == "UPDATING":
+        await agent.publish_update(
+            f"**Stage {current_stage_index} Complete** — advancing to stage {current_stage_index + 1}.",
+            conversation_id,
+            "INFO_UPDATE",
+        )
 
     # 2. Dispatch Tasks
     if next_actions:
@@ -136,13 +147,10 @@ async def handle_brain_output(final_state: dict, initial_status: str, headers: A
             )
 
             # Track assignment for timeout monitoring
-            if conversation_id not in _assignment_tracker:
-                _assignment_tracker[conversation_id] = {}
-            _assignment_tracker[conversation_id][target_agent] = {
-                "assigned_at": time.time(),
-                "instruction": instruction[:500],
-                "check_sent": False,
-            }
+            if _assignment_store:
+                await _assignment_store.track_assignment(
+                    conversation_id, target_agent, instruction
+                )
 
     # 3. Handle Completion or Blocked
     if squad_status == "DONE":
@@ -193,20 +201,23 @@ async def session_event_handler(msg: AgentMessage, agent: ShinoxAgent):
     # PEER_REQUEST grace period — if the source agent is tracked, defer re-delegation
     # and let the peer collaboration play out
     if headers.interaction_type == "PEER_REQUEST":
-        conv_tracker = _assignment_tracker.get(headers.conversation_id, {})
-        if headers.source_agent_id in conv_tracker:
-            tracker_entry = conv_tracker[headers.source_agent_id]
-            tracker_entry["assigned_at"] = time.time()  # Reset timer — grant grace period
-            tracker_entry["collaboration_in_progress"] = True
-            logger.info(
-                f"[{my_id}] Peer collaboration in progress for {headers.source_agent_id}, "
-                f"granting {COLLABORATION_GRACE_SECONDS}s grace period"
+        if _assignment_store:
+            entry = await _assignment_store.get_assignment(
+                headers.conversation_id, headers.source_agent_id
             )
-            print(
-                f"[{my_id}] Deferring on PEER_REQUEST from {headers.source_agent_id} "
-                f"(collaboration in progress)"
-            )
-            return
+            if entry:
+                await _assignment_store.grant_collaboration_grace(
+                    headers.conversation_id, headers.source_agent_id
+                )
+                logger.info(
+                    f"[{my_id}] Peer collaboration in progress for {headers.source_agent_id}, "
+                    f"granting {COLLABORATION_GRACE_SECONDS}s grace period"
+                )
+                print(
+                    f"[{my_id}] Deferring on PEER_REQUEST from {headers.source_agent_id} "
+                    f"(collaboration in progress)"
+                )
+                return
 
     # Passive Memory Update — enrich low-confidence TASK_RESULT with failure hint
     # so the brain's node_updater detects it as a failure even if content phrasing varies
@@ -256,9 +267,10 @@ async def session_event_handler(msg: AgentMessage, agent: ShinoxAgent):
 
     # Clear assignment tracking when we receive a result from an agent
     if headers.interaction_type == "TASK_RESULT":
-        conv_tracker = _assignment_tracker.get(headers.conversation_id, {})
-        if headers.source_agent_id in conv_tracker:
-            del conv_tracker[headers.source_agent_id]
+        if _assignment_store:
+            await _assignment_store.remove_assignment(
+                headers.conversation_id, headers.source_agent_id
+            )
             logger.debug(f"[{my_id}] Cleared tracker for {headers.source_agent_id}")
 
     # --- Invoke the Brain ---
@@ -266,7 +278,7 @@ async def session_event_handler(msg: AgentMessage, agent: ShinoxAgent):
     config = {"configurable": {"thread_id": headers.conversation_id}}
 
     # 1. Check existing state
-    current_state = await brain.aget_state(config)
+    current_state = await brain_module.brain.aget_state(config)
     existing_agents = current_state.values.get("available_squad_agents", []) if current_state and current_state.values else []
 
     squad_agents = []
@@ -306,7 +318,7 @@ async def session_event_handler(msg: AgentMessage, agent: ShinoxAgent):
     initial_status = "UPDATING" if headers.interaction_type in ("TASK_RESULT", "PEER_REQUEST", "GROUP_QUERY") else "IDLE"
 
     # Run the graph
-    final_state = await brain.ainvoke(state_input, config=config)
+    final_state = await brain_module.brain.ainvoke(state_input, config=config)
 
     # --- Dispatch Actions ---
     await handle_brain_output(final_state, initial_status, headers, agent)
@@ -315,87 +327,87 @@ async def session_event_handler(msg: AgentMessage, agent: ShinoxAgent):
 # --- Timeout Monitor ---
 
 async def _task_timeout_monitor(agent_instance: ShinoxAgent):
-    """Background task that monitors assigned tasks for timeouts."""
-    global _monitor_task
+    """Background task that monitors assigned tasks for timeouts using the persistent store."""
     logger.info(f"[{agent_instance.agent_id}] Task timeout monitor started "
                 f"(timeout: {TASK_TIMEOUT_SECONDS}s, check interval: {CHECK_INTERVAL_SECONDS}s)")
 
     while True:
         try:
             await asyncio.sleep(CHECK_INTERVAL_SECONDS)
-            now = time.time()
 
-            for conversation_id, agents in list(_assignment_tracker.items()):
-                for agent_id, info in list(agents.items()):
-                    elapsed = now - info["assigned_at"]
+            if not _assignment_store:
+                continue
 
-                    # First timeout: send a check-in
-                    if elapsed > TASK_TIMEOUT_SECONDS and not info["check_sent"]:
-                        logger.info(
-                            f"[{agent_instance.agent_id}] Task timeout for {agent_id} "
-                            f"({elapsed:.0f}s elapsed). Sending check-in."
-                        )
-                        try:
-                            target_topic = await agent_instance.resolve_agent_inbox(agent_id)
-                            checkin_headers = A2AHeaders(
-                                source_agent_id=agent_instance.agent_id,
-                                target_agent_id=agent_id,
-                                interaction_type="DIRECT_COMMAND",
-                                conversation_id=conversation_id,
-                            )
-                            await agent_instance.broker.publish(
-                                AgentMessage(
-                                    content="How is the task going? Please provide a status update.",
-                                    headers=checkin_headers,
-                                ),
-                                topic=target_topic,
-                                headers={
-                                    "x-source-agent": agent_instance.agent_id,
-                                    "x-dest-topic": target_topic,
-                                    "x-interaction-type": "DIRECT_COMMAND",
-                                    "x-conversation-id": conversation_id,
-                                },
-                            )
-                            info["check_sent"] = True
-                        except Exception as e:
-                            logger.warning(f"[{agent_instance.agent_id}] Check-in send failed: {e}")
+            # First timeout: assignments that haven't been checked yet
+            first_check = await _assignment_store.get_timed_out_first_check(TASK_TIMEOUT_SECONDS)
+            for row in first_check:
+                agent_id = row["agent_id"]
+                conversation_id = row["conversation_id"]
+                logger.info(
+                    f"[{agent_instance.agent_id}] Task timeout for {agent_id} "
+                    f"in conversation {conversation_id}. Sending check-in."
+                )
+                try:
+                    target_topic = await agent_instance.resolve_agent_inbox(agent_id)
+                    checkin_headers = A2AHeaders(
+                        source_agent_id=agent_instance.agent_id,
+                        target_agent_id=agent_id,
+                        interaction_type="DIRECT_COMMAND",
+                        conversation_id=conversation_id,
+                    )
+                    await agent_instance.broker.publish(
+                        AgentMessage(
+                            content="How is the task going? Please provide a status update.",
+                            headers=checkin_headers,
+                        ),
+                        topic=target_topic,
+                        headers={
+                            "x-source-agent": agent_instance.agent_id,
+                            "x-dest-topic": target_topic,
+                            "x-interaction-type": "DIRECT_COMMAND",
+                            "x-conversation-id": conversation_id,
+                        },
+                    )
+                    await _assignment_store.mark_check_sent(conversation_id, agent_id)
+                except Exception as e:
+                    logger.warning(f"[{agent_instance.agent_id}] Check-in send failed: {e}")
 
-                    # Second timeout: trigger re-delegation
-                    elif elapsed > TASK_TIMEOUT_SECONDS * 2 and info["check_sent"]:
-                        logger.warning(
-                            f"[{agent_instance.agent_id}] Agent {agent_id} unresponsive "
-                            f"({elapsed:.0f}s elapsed). Triggering re-delegation."
-                        )
-                        try:
-                            # Inject synthetic timeout message into brain
-                            config = {"configurable": {"thread_id": conversation_id}}
-                            timeout_msg = HumanMessage(
-                                content=(
-                                    f"Agent {agent_id} is having difficulty with a task and is unresponsive. "
-                                    f"Original task: {info['instruction']}"
-                                ),
-                                name=agent_id,
-                            )
-                            state_input = {
-                                "messages": [timeout_msg],
-                                "squad_status": "UPDATING",
-                            }
-                            final_state = await brain.ainvoke(state_input, config=config)
+            # Second timeout: trigger re-delegation
+            second_check = await _assignment_store.get_timed_out_second_check(TASK_TIMEOUT_SECONDS)
+            for row in second_check:
+                agent_id = row["agent_id"]
+                conversation_id = row["conversation_id"]
+                instruction = row["instruction"]
+                logger.warning(
+                    f"[{agent_instance.agent_id}] Agent {agent_id} unresponsive "
+                    f"in conversation {conversation_id}. Triggering re-delegation."
+                )
+                try:
+                    config = {"configurable": {"thread_id": conversation_id}}
+                    timeout_msg = HumanMessage(
+                        content=(
+                            f"Agent {agent_id} is having difficulty with a task and is unresponsive. "
+                            f"Original task: {instruction}"
+                        ),
+                        name=agent_id,
+                    )
+                    state_input = {
+                        "messages": [timeout_msg],
+                        "squad_status": "UPDATING",
+                    }
+                    final_state = await brain_module.brain.ainvoke(state_input, config=config)
 
-                            # Build synthetic headers for dispatch
-                            synthetic_headers = A2AHeaders(
-                                source_agent_id=agent_id,
-                                interaction_type="PEER_REQUEST",
-                                conversation_id=conversation_id,
-                            )
-                            await handle_brain_output(final_state, "UPDATING", synthetic_headers, agent_instance)
+                    synthetic_headers = A2AHeaders(
+                        source_agent_id=agent_id,
+                        interaction_type="PEER_REQUEST",
+                        conversation_id=conversation_id,
+                    )
+                    await handle_brain_output(final_state, "UPDATING", synthetic_headers, agent_instance)
 
-                            # Remove from tracker
-                            del agents[agent_id]
-                        except Exception as e:
-                            logger.error(f"[{agent_instance.agent_id}] Re-delegation failed: {e}")
-                            # Remove to avoid infinite retries
-                            del agents[agent_id]
+                    await _assignment_store.remove_assignment(conversation_id, agent_id)
+                except Exception as e:
+                    logger.error(f"[{agent_instance.agent_id}] Re-delegation failed: {e}")
+                    await _assignment_store.remove_assignment(conversation_id, agent_id)
 
         except asyncio.CancelledError:
             logger.debug(f"[{agent_instance.agent_id}] Task timeout monitor cancelled")
@@ -413,17 +425,31 @@ agent = ShinoxAgent(
 app = agent.app
 
 
-# --- Lifecycle: Start/Stop Timeout Monitor ---
+# --- Lifecycle: Start/Stop ---
 
 @app.on_startup
-async def _start_timeout_monitor():
-    global _monitor_task
+async def _on_startup():
+    global _assignment_store, _monitor_task
+
+    # 1. Initialise persistent assignment store (if DATABASE_URL is set)
+    if DATABASE_URL:
+        _assignment_store = AssignmentStore(DATABASE_URL)
+        await _assignment_store.initialize()
+
+        # 2. Re-compile brain with PostgreSQL checkpointer
+        await brain_module.initialize_persistent_brain(DATABASE_URL)
+    else:
+        logger.warning("DATABASE_URL not set — running with in-memory state only (no persistence)")
+
+    # 3. Start timeout monitor
     _monitor_task = asyncio.create_task(_task_timeout_monitor(agent))
 
 
 @app.on_shutdown
-async def _stop_timeout_monitor():
+async def _on_shutdown():
     global _monitor_task
+
+    # Stop timeout monitor
     if _monitor_task and not _monitor_task.done():
         _monitor_task.cancel()
         try:
@@ -431,6 +457,10 @@ async def _stop_timeout_monitor():
         except asyncio.CancelledError:
             pass
         logger.info(f"[{agent.agent_id}] Task timeout monitor stopped")
+
+    # Close assignment store pool
+    if _assignment_store:
+        await _assignment_store.close()
 
 
 # --- Run ---
