@@ -1,0 +1,489 @@
+networks:
+  shinox_infra:
+    driver: overlay
+    attachable: true
+
+volumes:
+  redpanda: null
+  pgdata: null
+  loki: null
+  grafana: null
+
+services:
+  redpanda-0:
+    container_name: redpanda-0
+    hostname: redpanda-0
+    image: redpandadata/redpanda:v25.3.4
+    networks:
+      - shinox_infra
+    ports:
+      - "18081:18081" # Schema Registry
+      - "18082:18082" # HTTP Proxy
+      - "19092:19092" # Kafka API External
+      - "9644:9644"   # Admin API
+    volumes:
+      - redpanda:/var/lib/redpanda/data
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      # Address the broker advertises to clients that connect to the Kafka API.
+      # Use the internal addresses to connect to the Redpanda brokers'
+      # from inside the same Docker network.
+      # Use the external addresses to connect to the Redpanda brokers'
+      # from outside the Docker network.
+      - --advertise-kafka-addr internal://redpanda-0:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      # Address the broker advertises to clients that connect to the HTTP Proxy.
+      - --advertise-pandaproxy-addr internal://redpanda-0:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      # Redpanda brokers use the RPC API to communicate with each other internally.
+      - --rpc-addr redpanda-0:33145
+      - --advertise-rpc-addr redpanda-0:33145
+      # Mode dev-container uses well-known configuration properties for development in containers.
+      - --mode dev-container
+      # Tells Seastar (the framework Redpanda uses under the hood) to use 1 core on the system.
+      - --smp 1
+      - --default-log-level=info
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redpanda-console:
+    container_name: redpanda-console
+    image: docker.redpanda.com/redpandadata/console:v3.3.2
+    networks:
+      - shinox_infra
+    entrypoint: /bin/sh
+    command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml; /app/console'
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda-0:9092"]
+        schemaRegistry:
+          enabled: true
+          urls: ["http://redpanda-0:8081"]
+        redpanda:
+          adminApi:
+            enabled: true
+            urls: ["http://redpanda-0:9644"]
+    ports:
+      - 8080:8080
+    depends_on:
+      - redpanda-0
+
+  # ==========================================
+  # INITIALIZATION SERVICE
+  # Creates Topics & Registers Schemas
+  # ==========================================
+  init-redpanda:
+    image: redpandadata/redpanda:v25.3.4
+    network_mode: "service:redpanda-0"
+    depends_on:
+      - redpanda-0
+    restart: "no"
+    volumes:
+      - ./schemas:/tmp/schemas
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo 'Waiting for Redpanda to be ready...'
+        until rpk cluster health | grep -E 'Healthy:.+true'; do
+          echo 'Redpanda is not ready yet. Retrying in 5 seconds...'
+          sleep 5
+        done
+
+        # ---------------------------------------------------------
+        # 1. TOPIC CREATION
+        # ---------------------------------------------------------
+        echo 'Creating Topics...'
+        
+        # Governance Buffer (Short retention)
+        rpk topic create mesh.responses.pending -c cleanup.policy=delete -c retention.ms=3600000 || true
+        
+        # Global Event Stream (Compact - Vital for Replay)
+        rpk topic create mesh.global.events -c cleanup.policy=compact || true
+        
+        # Signals (Kill Switch)
+        rpk topic create sys.governance.signals -c cleanup.policy=delete -c retention.ms=600000 || true
+        
+        # Audit & HITL (Permanent)
+        rpk topic create sys.governance.alerts -c cleanup.policy=delete -c retention.ms=-1 || true
+
+        # Operations
+        rpk topic create mesh.dlq -c cleanup.policy=delete -c retention.ms=604800000 || true
+        rpk topic create sys.rag.ingest -c cleanup.policy=delete -c retention.ms=604800000 || true
+        rpk topic create sys.approvals.request -c cleanup.policy=delete -c retention.ms=-1 || true
+        rpk topic create sys.approvals.response -c cleanup.policy=delete -c retention.ms=-1 || true
+        # rpk topic create session.{uuid} -c cleanup.policy=delete -c retention.ms=-1 || true
+        # rpk topic create mesh.agent.{id}.inbox -c cleanup.policy=delete -c retention.ms=3600000 || true
+
+        echo 'Topics created successfully.'
+        echo 'Current topics:'
+        rpk topic list        
+
+        # ---------------------------------------------------------
+        # 2. CONSUMER GROUP PRE-CREATION
+        # We use 'group seek' to initialize the group and set 
+        # its pointer to the START of the topic.
+        # ---------------------------------------------------------
+        echo 'Pre-warming Consumer Groups...'
+
+        # A. Governance Service
+        # Must see all pending messages from the start to avoid missing a draft.
+        rpk group seek svc-governance-validator --to start --topics mesh.responses.pending --allow-new-topics
+
+        # B. Planner Agent
+        # Must read the full Global Event history to build context.
+        rpk group seek agent-planner-core --to start --topics mesh.global.events --allow-new-topics
+
+        # C. RAG Indexer
+        # Should process all queued documents, even old ones.
+        rpk group seek svc-rag-indexer --to start --topics sys.rag.ingest --allow-new-topics
+
+        # D. HITL Dashboard
+        # Must see all pending approval requests.
+        rpk group seek svc-hitl-dashboard --to start --topics sys.approvals.request --allow-new-topics
+
+        # Note: We do NOT pre-create 'agent-worker-{id}' groups 
+        # because those IDs are dynamic (UUIDs) and generated at runtime.
+
+        echo 'Consumer Groups pre-warmed successfully.'
+        echo 'Current Consumer Groups:'
+        rpk group list
+
+        # ---------------------------------------------------------
+        # 3. SCHEMA REGISTRATION
+        # ---------------------------------------------------------
+        echo 'Registering Schemas...'
+        
+        rpk registry schema create agent-message --schema /tmp/schemas/agent-message.json --format json || true
+        rpk registry schema create governance-signal --schema /tmp/schemas/governance-signal.json --format json || true
+
+        echo 'Schemas registered successfully.'
+        echo 'Current Schemas:'
+        rpk registry schema list
+
+        echo 'Initialization Complete.'
+
+  # ==========================================
+  # A2A SERVICES
+  # ==========================================
+
+  # Agent Registry - Discovery Service
+  agent-registry:
+    build:
+      context: ../
+      dockerfile: infra/Dockerfile.agent-registry
+    image: ${REPO}/agent-registry:${IMAGE_TAG}
+    container_name: agent-registry
+    hostname: agent-registry
+    networks:
+      - shinox_infra
+    ports:
+      - "9000:9000"
+    environment:
+      - REGISTRY_ID=agent-registry-001
+      - REGISTRY_URL=http://agent-registry:9000
+      - DATABASE_URL=postgresql://admin:adminpassword@postgres-db:5432/shinoxdb?sslmode=disable
+      - REGISTRY_HOST=0.0.0.0
+      - REGISTRY_PORT=9000
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      - redpanda-0
+
+  # Squad Lead - A2A Agent Server
+  squad-lead-agent:
+    build:
+      context: ../
+      dockerfile: infra/Dockerfile.squad-lead-agent
+    image: ${REPO}/squad-lead-agent:${IMAGE_TAG}
+    container_name: squad-lead-agent
+    hostname: squad-lead-agent
+    networks:
+      - shinox_infra
+    environment:
+      - AGENT_PORT=8001
+      - AGENT_ID=agent-squad-lead-01
+      - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DATABASE_URL=postgresql://admin:adminpassword@postgres-db:5432/shinoxdb
+      - LOG_LEVEL=INFO
+    depends_on:
+      - agent-registry
+      - postgres-db
+
+  # Governance Service
+  governance:
+    build:
+      context: ../
+      dockerfile: infra/Dockerfile.governance
+    image: ${REPO}/governance:${IMAGE_TAG}
+    container_name: governance
+    hostname: governance
+    networks:
+      - shinox_infra
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - LOG_LEVEL=INFO
+    depends_on:
+      - redpanda-0
+      - init-redpanda
+
+  # Director Service
+  director:
+    build:
+      context: ../
+      dockerfile: infra/Dockerfile.director
+    image: ${REPO}/director:${IMAGE_TAG}
+    container_name: director
+    hostname: director
+    networks:
+      - shinox_infra
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - LOG_LEVEL=INFO
+    ports:
+      - "8000:8000"
+    depends_on:
+      - governance
+      - redpanda-0
+      - init-redpanda
+
+  # PostgreSQL Database
+  postgres-db:
+    image: pgvector/pgvector:pg17
+    container_name: postgres-db
+    hostname: postgres-db
+    networks:
+      - shinox_infra
+    environment:
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=adminpassword
+      - POSTGRES_DB=shinoxdb
+      - TZ=UTC
+      - PGTZ=UTC
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # Kafka to DB Ingestor
+  kafka2db:
+    build:
+      context: ../
+      dockerfile: infra/Dockerfile.kafka2db
+    image: ${REPO}/kafka2db:${IMAGE_TAG}
+    container_name: kafka2db
+    hostname: kafka2db
+    networks:
+      - shinox_infra
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - DATABASE_URL=postgresql://admin:adminpassword@postgres-db:5432/shinoxdb?sslmode=disable
+      - POSTGRES_HOST=postgres-db
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=shinoxdb
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=adminpassword
+    depends_on:
+      - postgres-db
+      - redpanda-0
+      - init-redpanda
+
+  accounting-agent:
+    build:
+      context: ../
+      dockerfile: infra/Dockerfile.accounting-agent
+    image: ${REPO}/accounting-agent:${IMAGE_TAG}
+    container_name: accounting-agent
+    hostname: accounting-agent
+    networks:
+      - shinox_infra
+    environment:
+      - AGENT_PORT=8001
+      - AGENT_ID=agent-accounting-01
+      - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LOG_LEVEL=INFO
+    depends_on:
+      - agent-registry
+
+  general-fast-agent:
+    build:
+      context: ../
+      dockerfile: infra/Dockerfile.general-fast-agent
+    image: ${REPO}/general-fast-agent:${IMAGE_TAG}
+    container_name: general-fast-agent
+    hostname: general-fast-agent
+    networks:
+      - shinox_infra
+    environment:
+      - AGENT_PORT=8001
+      - AGENT_ID=agent-general-fast-01
+      - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LOG_LEVEL=INFO
+    depends_on:
+      - agent-registry
+
+  philosopher-agent:
+    build:
+      context: ../
+      dockerfile: infra/Dockerfile.philosopher-agent
+    image: ${REPO}/philosopher-agent:${IMAGE_TAG}
+    container_name: philosopher-agent
+    hostname: philosopher-agent
+    networks:
+      - shinox_infra
+    environment:
+      - AGENT_PORT=8001
+      - AGENT_ID=agent-philosopher-01
+      - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LOG_LEVEL=INFO
+    depends_on:
+      - agent-registry
+
+  todo-list-agent:
+    build:
+      context: ../
+      dockerfile: infra/Dockerfile.todo-list-agent
+    image: ${REPO}/todo-list-agent:${IMAGE_TAG}
+    container_name: todo-list-agent
+    hostname: todo-list-agent
+    networks:
+      - shinox_infra
+    ports:
+      - "3456:3456"  # Todo Dashboard
+    environment:
+      - AGENT_PORT=8001
+      - AGENT_ID=agent-todo-list-01
+      - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MCP_SERVER_PATH=/app/mcp_server/dist/index.js
+      - LOG_LEVEL=INFO
+    depends_on:
+      - agent-registry
+
+  # ==========================================
+  # API GATEWAY (Frontend Backend)
+  # ==========================================
+  api-gateway:
+    build:
+      context: ../
+      dockerfile: infra/Dockerfile.api-gateway
+    image: ${REPO}/api-gateway:${IMAGE_TAG}
+    container_name: api-gateway
+    hostname: api-gateway
+    networks:
+      - shinox_infra
+    ports:
+      - "8002:8002"
+    environment:
+      - DATABASE_URL=postgresql://admin:adminpassword@postgres-db:5432/shinoxdb
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - API_PORT=8002
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      - postgres-db
+      - redpanda-0
+      - init-redpanda
+
+  # ==========================================
+  # DASHBOARD (Next.js Frontend)
+  # ==========================================
+  dashboard:
+    build:
+      context: ../
+      dockerfile: infra/Dockerfile.dashboard
+    image: ${REPO}/dashboard:${IMAGE_TAG}
+    container_name: dashboard
+    hostname: dashboard
+    networks:
+      - shinox_infra
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_GATEWAY_URL=http://api-gateway:8002
+    depends_on:
+      - api-gateway
+
+  # ==========================================
+  # OBSERVABILITY STACK
+  # ==========================================
+
+  # Loki - Log Aggregation
+  loki:
+    image: grafana/loki:3.4.2
+    container_name: loki
+    hostname: loki
+    networks:
+      - shinox_infra
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki:/loki
+      - ./monitoring/loki-config.yaml:/etc/loki/local-config.yaml
+    command: -config.file=/etc/loki/local-config.yaml
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Promtail - Log Collection Agent
+  promtail:
+    image: grafana/promtail:3.4.2
+    container_name: promtail
+    hostname: promtail
+    networks:
+      - shinox_infra
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./monitoring/promtail-config.yaml:/etc/promtail/config.yaml
+    command: -config.file=/etc/promtail/config.yaml
+    depends_on:
+      - loki
+
+  # Grafana - Dashboards & Visualization
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: grafana
+    hostname: grafana
+    networks:
+      - shinox_infra
+    ports:
+      - "3030:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - grafana:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - loki

@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentMessage",
+  "type": "object",
+  "properties": {
+    "id": { "type": "string", "description": "UUID of the message" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "source_agent_id": { "type": "string" },
+    "conversation_id": { "type": "string", "description": "Session ID for partitioning" },
+    "type": { 
+      "type": "string", 
+      "enum": ["THOUGHT", "TOOL_USE", "FINAL_ANSWER", "SYSTEM_NOTIFICATION"] 
+    },
+    "content": { "type": "string", "description": "The LLM output or tool result" },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "confidence": { "type": "number" },
+        "model": { "type": "string" }
+      }
+    }
+  },
+  "required": ["id", "source_agent_id", "conversation_id", "type", "content"]
+}

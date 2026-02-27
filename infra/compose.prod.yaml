@@ -1,0 +1,424 @@
+# Production Compose - Uses pre-built images from Docker Hub
+# Place this on the VPS at /opt/shinox/compose.yaml
+#
+# Required: Create /opt/shinox/.env with:
+#   DOCKER_USERNAME=your-dockerhub-username
+#   OPENAI_API_KEY=sk-...
+#
+name: agentSquad_infra
+
+networks:
+  agentSquad_infra:
+    driver: bridge
+
+volumes:
+  redpanda: null
+  pgdata: null
+  loki: null
+  grafana: null
+
+services:
+  redpanda-0:
+    container_name: redpanda-0
+    hostname: redpanda-0
+    image: redpandadata/redpanda:v25.3.4
+    networks:
+      - agentSquad_infra
+    ports:
+      - "18081:18081" # Schema Registry
+      - "18082:18082" # HTTP Proxy
+      - "19092:19092" # Kafka API External
+      - "9644:9644"   # Admin API
+    volumes:
+      - redpanda:/var/lib/redpanda/data
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda-0:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda-0:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr redpanda-0:33145
+      - --advertise-rpc-addr redpanda-0:33145
+      - --mode dev-container
+      - --smp 1
+      - --default-log-level=info
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redpanda-console:
+    container_name: redpanda-console
+    image: docker.redpanda.com/redpandadata/console:v3.3.2
+    networks:
+      - agentSquad_infra
+    entrypoint: /bin/sh
+    command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml; /app/console'
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda-0:9092"]
+        schemaRegistry:
+          enabled: true
+          urls: ["http://redpanda-0:8081"]
+        redpanda:
+          adminApi:
+            enabled: true
+            urls: ["http://redpanda-0:9644"]
+    ports:
+      - 8080:8080
+    depends_on:
+      redpanda-0:
+        condition: service_healthy
+
+  # ==========================================
+  # INITIALIZATION SERVICE
+  # Creates Topics & Registers Schemas
+  # ==========================================
+  init-redpanda:
+    image: redpandadata/redpanda:v25.3.4
+    network_mode: "service:redpanda-0"
+    depends_on:
+      redpanda-0:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ./schemas:/tmp/schemas
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo 'Waiting for Redpanda to be ready...'
+        until rpk cluster health | grep -E 'Healthy:.+true'; do
+          echo 'Redpanda is not ready yet. Retrying in 5 seconds...'
+          sleep 5
+        done
+
+        echo 'Creating Topics...'
+        rpk topic create mesh.responses.pending -c cleanup.policy=delete -c retention.ms=3600000 || true
+        rpk topic create mesh.global.events -c cleanup.policy=compact || true
+        rpk topic create sys.governance.signals -c cleanup.policy=delete -c retention.ms=600000 || true
+        rpk topic create sys.governance.alerts -c cleanup.policy=delete -c retention.ms=-1 || true
+        rpk topic create mesh.dlq -c cleanup.policy=delete -c retention.ms=604800000 || true
+        rpk topic create sys.rag.ingest -c cleanup.policy=delete -c retention.ms=604800000 || true
+        rpk topic create sys.approvals.request -c cleanup.policy=delete -c retention.ms=-1 || true
+        rpk topic create sys.approvals.response -c cleanup.policy=delete -c retention.ms=-1 || true
+        echo 'Topics created successfully.'
+        rpk topic list
+
+        echo 'Pre-warming Consumer Groups...'
+        rpk group seek svc-governance-validator --to start --topics mesh.responses.pending --allow-new-topics
+        rpk group seek agent-planner-core --to start --topics mesh.global.events --allow-new-topics
+        rpk group seek svc-rag-indexer --to start --topics sys.rag.ingest --allow-new-topics
+        rpk group seek svc-hitl-dashboard --to start --topics sys.approvals.request --allow-new-topics
+        echo 'Consumer Groups pre-warmed successfully.'
+        rpk group list
+
+        echo 'Registering Schemas...'
+        rpk registry schema create agent-message --schema /tmp/schemas/agent-message.json --format json || true
+        rpk registry schema create governance-signal --schema /tmp/schemas/governance-signal.json --format json || true
+        echo 'Schemas registered successfully.'
+        rpk registry schema list
+
+        echo 'Initialization Complete.'
+
+  # ==========================================
+  # A2A SERVICES (Pre-built from Docker Hub)
+  # ==========================================
+
+  agent-registry:
+    image: ${DOCKER_USERNAME}/shinox-agent-registry:latest
+    container_name: agent-registry
+    hostname: agent-registry
+    networks:
+      - agentSquad_infra
+    ports:
+      - "9000:9000"
+    environment:
+      - REGISTRY_ID=agent-registry-001
+      - REGISTRY_URL=http://agent-registry:9000
+      - DATABASE_URL=postgresql://admin:adminpassword@postgres-db:5432/agentsquaddb?sslmode=disable
+      - REGISTRY_HOST=0.0.0.0
+      - REGISTRY_PORT=9000
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      redpanda-0:
+        condition: service_healthy
+
+  squad-lead-agent:
+    image: ${DOCKER_USERNAME}/shinox-squad-lead-agent:latest
+    container_name: squad-lead-agent
+    hostname: squad-lead-agent
+    networks:
+      - agentSquad_infra
+    environment:
+      - AGENT_PORT=8001
+      - AGENT_ID=agent-squad-lead-01
+      - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DATABASE_URL=postgresql://admin:adminpassword@postgres-db:5432/agentsquaddb
+      - LOG_LEVEL=INFO
+    depends_on:
+      agent-registry:
+        condition: service_healthy
+      postgres-db:
+        condition: service_started
+
+  governance:
+    image: ${DOCKER_USERNAME}/shinox-governance:latest
+    container_name: governance
+    hostname: governance
+    networks:
+      - agentSquad_infra
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - LOG_LEVEL=INFO
+    depends_on:
+      redpanda-0:
+        condition: service_healthy
+      init-redpanda:
+        condition: service_completed_successfully
+
+  director:
+    image: ${DOCKER_USERNAME}/shinox-director:latest
+    container_name: director
+    hostname: director
+    networks:
+      - agentSquad_infra
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - LOG_LEVEL=INFO
+    ports:
+      - "8000:8000"
+    depends_on:
+      governance:
+        condition: service_started
+      redpanda-0:
+        condition: service_healthy
+      init-redpanda:
+        condition: service_completed_successfully
+
+  postgres-db:
+    image: pgvector/pgvector:pg17
+    container_name: postgres-db
+    hostname: postgres-db
+    networks:
+      - agentSquad_infra
+    environment:
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=adminpassword
+      - POSTGRES_DB=agentsquaddb
+      - TZ=UTC
+      - PGTZ=UTC
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./schemas/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql
+      - ./schemas/002_squad_assignments.sql:/docker-entrypoint-initdb.d/002_squad_assignments.sql
+
+  kafka2db:
+    image: ${DOCKER_USERNAME}/shinox-kafka2db:latest
+    container_name: kafka2db
+    hostname: kafka2db
+    networks:
+      - agentSquad_infra
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - DATABASE_URL=postgresql://admin:adminpassword@postgres-db:5432/agentsquaddb?sslmode=disable
+      - POSTGRES_HOST=postgres-db
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=agentsquaddb
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=adminpassword
+    depends_on:
+      postgres-db:
+        condition: service_started
+      redpanda-0:
+        condition: service_healthy
+      init-redpanda:
+        condition: service_completed_successfully
+
+  accounting-agent:
+    image: ${DOCKER_USERNAME}/shinox-accounting-agent:latest
+    container_name: accounting-agent
+    hostname: accounting-agent
+    networks:
+      - agentSquad_infra
+    environment:
+      - AGENT_PORT=8001
+      - AGENT_ID=agent-accounting-01
+      - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LOG_LEVEL=INFO
+    depends_on:
+      agent-registry:
+        condition: service_healthy
+
+  general-fast-agent:
+    image: ${DOCKER_USERNAME}/shinox-general-fast-agent:latest
+    container_name: general-fast-agent
+    hostname: general-fast-agent
+    networks:
+      - agentSquad_infra
+    environment:
+      - AGENT_PORT=8001
+      - AGENT_ID=agent-general-fast-01
+      - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LOG_LEVEL=INFO
+    depends_on:
+      agent-registry:
+        condition: service_healthy
+
+  philosopher-agent:
+    image: ${DOCKER_USERNAME}/shinox-philosopher-agent:latest
+    container_name: philosopher-agent
+    hostname: philosopher-agent
+    networks:
+      - agentSquad_infra
+    environment:
+      - AGENT_PORT=8001
+      - AGENT_ID=agent-philosopher-01
+      - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LOG_LEVEL=INFO
+    depends_on:
+      agent-registry:
+        condition: service_healthy
+
+  todo-list-agent:
+    image: ${DOCKER_USERNAME}/shinox-todo-list-agent:latest
+    container_name: todo-list-agent
+    hostname: todo-list-agent
+    networks:
+      - agentSquad_infra
+    environment:
+      - AGENT_PORT=8001
+      - AGENT_ID=agent-todo-list-01
+      - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MCP_SERVER_PATH=/app/mcp_server/dist/index.js
+      - LOG_LEVEL=INFO
+    depends_on:
+      agent-registry:
+        condition: service_healthy
+
+  # ==========================================
+  # API GATEWAY (Frontend Backend)
+  # ==========================================
+  api-gateway:
+    image: ${DOCKER_USERNAME}/shinox-api-gateway:latest
+    container_name: api-gateway
+    hostname: api-gateway
+    networks:
+      - agentSquad_infra
+    ports:
+      - "8002:8002"
+    environment:
+      - DATABASE_URL=postgresql://admin:adminpassword@postgres-db:5432/agentsquaddb
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - API_PORT=8002
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      postgres-db:
+        condition: service_started
+      redpanda-0:
+        condition: service_healthy
+      init-redpanda:
+        condition: service_completed_successfully
+
+  # ==========================================
+  # DASHBOARD (Next.js Frontend)
+  # ==========================================
+  dashboard:
+    image: ${DOCKER_USERNAME}/shinox-dashboard:latest
+    container_name: dashboard
+    hostname: dashboard
+    networks:
+      - agentSquad_infra
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_GATEWAY_URL=http://api-gateway:8002
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+
+  # ==========================================
+  # OBSERVABILITY STACK
+  # ==========================================
+
+  loki:
+    image: grafana/loki:3.4.2
+    container_name: loki
+    hostname: loki
+    networks:
+      - agentSquad_infra
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki:/loki
+      - ./monitoring/loki-config.yaml:/etc/loki/local-config.yaml
+    command: -config.file=/etc/loki/local-config.yaml
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  promtail:
+    image: grafana/promtail:3.4.2
+    container_name: promtail
+    hostname: promtail
+    networks:
+      - agentSquad_infra
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./monitoring/promtail-config.yaml:/etc/promtail/config.yaml
+    command: -config.file=/etc/promtail/config.yaml
+    depends_on:
+      loki:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: grafana
+    hostname: grafana
+    networks:
+      - agentSquad_infra
+    ports:
+      - "3030:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - grafana:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      loki:
+        condition: service_healthy

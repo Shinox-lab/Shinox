@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GovernanceSignal",
+  "type": "object",
+  "properties": {
+    "signal_id": { "type": "string" },
+    "action": { "type": "string", "enum": ["STOP", "PAUSE", "RESUME"] },
+    "target_agent_id": { "type": "string", "description": "Target UUID or 'ALL'" },
+    "reason": { "type": "string" }
+  },
+  "required": ["action", "target_agent_id"]
+}
