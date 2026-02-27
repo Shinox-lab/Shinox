@@ -11,14 +11,14 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
 # 3. Copy dependency files
-COPY Shinox/governance/pyproject.toml Shinox/governance/uv.lock ./
+COPY governance/pyproject.toml governance/uv.lock ./
 
 # 4. Install dependencies
 # Install dependencies only (no project source yet) for better caching
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy application code
-COPY Shinox/governance/*.py ./
+COPY governance/*.py ./
 
 # Install the project itself into the environment
 RUN uv sync --frozen --no-dev

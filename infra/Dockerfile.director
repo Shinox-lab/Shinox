@@ -11,14 +11,14 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
 # 3. Copy dependency files
-COPY Shinox/director/pyproject.toml Shinox/director/uv.lock ./
+COPY director/pyproject.toml director/uv.lock ./
 
 # 4. Install dependencies
 # Remove --frozen so it picks up the new jinja2 dependency from pyproject.toml
 RUN uv sync --no-dev
 
 # Copy application code and templates
-COPY Shinox/director/*.py ./
+COPY director/*.py ./
 
 EXPOSE 8000
 

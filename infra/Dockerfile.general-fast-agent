@@ -11,13 +11,13 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
 # 3. Copy dependency files first (for caching)
-COPY Shinox/agents/general_fast/pyproject.toml Shinox/agents/general_fast/uv.lock ./
+COPY agents/general_fast/pyproject.toml agents/general_fast/uv.lock ./
 
 # 4. Install dependencies only (better layer caching)
 RUN uv sync --no-dev --no-install-project
 
 # 5. Copy all application code (preserving structure)
-COPY Shinox/agents/general_fast/ ./
+COPY agents/general_fast/ ./
 
 # 6. Install the project itself
 RUN uv sync --no-dev

@@ -13,24 +13,24 @@ WORKDIR /app
 
 # 3. Build the MCP server (Node.js)
 # Copy dependency manifest first (for layer caching)
-COPY Shinox/agents/todo_list/mcp_tool/server/package.json Shinox/agents/todo_list/mcp_tool/server/yarn.lock* ./mcp_server/
+COPY agents/todo_list/mcp_tool/server/package.json agents/todo_list/mcp_tool/server/yarn.lock* ./mcp_server/
 WORKDIR /app/mcp_server
 RUN npm install
 
 # Copy only source files — NOT node_modules (local ones are built for macOS, not Linux)
-COPY Shinox/agents/todo_list/mcp_tool/server/src/ ./src/
-COPY Shinox/agents/todo_list/mcp_tool/server/tsconfig.json ./
+COPY agents/todo_list/mcp_tool/server/src/ ./src/
+COPY agents/todo_list/mcp_tool/server/tsconfig.json ./
 RUN npm run build
 
 # 4. Install Python agent dependencies
 WORKDIR /app
-COPY Shinox/agents/todo_list/pyproject.toml Shinox/agents/todo_list/uv.lock ./
+COPY agents/todo_list/pyproject.toml agents/todo_list/uv.lock ./
 RUN uv sync --no-dev --no-install-project
 
 # 5. Copy all agent application code (excluding mcp_tool/server/node_modules via .dockerignore or selective copy)
-COPY Shinox/agents/todo_list/*.py Shinox/agents/todo_list/start.sh* ./
-COPY Shinox/agents/todo_list/mcp_tool/client/ ./mcp_tool/client/
-COPY Shinox/agents/todo_list/pyproject.toml Shinox/agents/todo_list/uv.lock ./
+COPY agents/todo_list/*.py agents/todo_list/start.sh* ./
+COPY agents/todo_list/mcp_tool/client/ ./mcp_tool/client/
+COPY agents/todo_list/pyproject.toml agents/todo_list/uv.lock ./
 
 # 6. Install the project itself
 RUN uv sync --no-dev

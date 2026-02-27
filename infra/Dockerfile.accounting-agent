@@ -11,13 +11,13 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
 # 3. Copy dependency files first (for caching)
-COPY Shinox/agents/test_external/accounting_agent/pyproject.toml Shinox/agents/test_external/accounting_agent/uv.lock ./
+COPY agents/test_external/accounting_agent/pyproject.toml agents/test_external/accounting_agent/uv.lock ./
 
 # 4. Install dependencies only (better layer caching)
 RUN uv sync --no-dev --no-install-project
 
 # 5. Copy all application code (preserving structure)
-COPY Shinox/agents/test_external/accounting_agent/ ./
+COPY agents/test_external/accounting_agent/ ./
 
 # 6. Install the project itself
 RUN uv sync --no-dev
