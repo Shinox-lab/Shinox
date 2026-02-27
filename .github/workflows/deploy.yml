@@ -22,7 +22,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.REGISTRY_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Compute lowercase repo name (GHCR requires all-lowercase image names)
       - name: Set lowercase repo name
@@ -142,5 +142,5 @@ jobs:
 
           # 3. Inject REPO and IMAGE_TAG into compose.yaml, then deploy via SSH
           envsubst < infra/compose.yaml | ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
-          "echo '${{ secrets.REGISTRY_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin && \
+          "echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin && \
            docker stack deploy --with-registry-auth -c - shinox"
