@@ -1,0 +1,142 @@
+name: Production Deployment (Docker Swarm)
+
+on:
+  push:
+    branches: [ main ] # Only deploy when code is pushed to main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    # Permission needed to read the repo and write to the GitHub Container Registry (GHCR)
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      # ==========================================
+      # BUILD AND PUSH ALL SERVICES
+      # Each image is tagged with the Git Commit SHA for traceability
+      # ==========================================
+
+      - name: Build and Push agent-registry
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile.agent-registry
+          push: true
+          tags: ghcr.io/${{ github.repository }}/agent-registry:${{ github.sha }}
+
+      - name: Build and Push squad-lead-agent
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile.squad-lead-agent
+          push: true
+          tags: ghcr.io/${{ github.repository }}/squad-lead-agent:${{ github.sha }}
+
+      - name: Build and Push governance
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile.governance
+          push: true
+          tags: ghcr.io/${{ github.repository }}/governance:${{ github.sha }}
+
+      - name: Build and Push director
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile.director
+          push: true
+          tags: ghcr.io/${{ github.repository }}/director:${{ github.sha }}
+
+      - name: Build and Push kafka2db
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile.kafka2db
+          push: true
+          tags: ghcr.io/${{ github.repository }}/kafka2db:${{ github.sha }}
+
+      - name: Build and Push accounting-agent
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile.accounting-agent
+          push: true
+          tags: ghcr.io/${{ github.repository }}/accounting-agent:${{ github.sha }}
+
+      - name: Build and Push general-fast-agent
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile.general-fast-agent
+          push: true
+          tags: ghcr.io/${{ github.repository }}/general-fast-agent:${{ github.sha }}
+
+      - name: Build and Push philosopher-agent
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile.philosopher-agent
+          push: true
+          tags: ghcr.io/${{ github.repository }}/philosopher-agent:${{ github.sha }}
+
+      - name: Build and Push todo-list-agent
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile.todo-list-agent
+          push: true
+          tags: ghcr.io/${{ github.repository }}/todo-list-agent:${{ github.sha }}
+
+      - name: Build and Push api-gateway
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile.api-gateway
+          push: true
+          tags: ghcr.io/${{ github.repository }}/api-gateway:${{ github.sha }}
+
+      - name: Build and Push dashboard
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile.dashboard
+          push: true
+          tags: ghcr.io/${{ github.repository }}/dashboard:${{ github.sha }}
+
+      # ==========================================
+      # DEPLOY TO DOCKER SWARM VIA SSH
+      # envsubst injects IMAGE_TAG and REPO into compose.yaml
+      # before streaming it to the remote host via SSH
+      # ==========================================
+      - name: Deploy to Docker Swarm
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          REPO: ghcr.io/${{ github.repository }}
+        run: |
+          # 1. Install envsubst
+          sudo apt-get install -y gettext-base
+
+          # 2. Setup SSH Key
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+          # 3. Inject REPO and IMAGE_TAG into compose.yaml, then deploy via SSH
+          envsubst < infra/compose.yaml | ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+          "echo '${{ secrets.REGISTRY_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin && \
+           docker stack deploy --with-registry-auth -c - shinox"
