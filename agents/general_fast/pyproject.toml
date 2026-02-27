@@ -12,5 +12,5 @@ dependencies = [
     "uvicorn>=0.40.0",
     "python-dotenv>=1.0.0",
     "faststream[cli,kafka]>=0.6.5",
-    "shinox-agent-sdk==0.1.1",
+    "shinox-agent-sdk>=0.1.1",
 ]

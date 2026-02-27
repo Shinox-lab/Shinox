@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import yaml
@@ -43,6 +44,23 @@ producer = None
 admin_client = None
 openai_client = None
 
+# --- CONTEXT INJECTION (sent to all agents on JOIN_SESSION) ---
+AGENT_CONTEXT_INJECTION = """\
+## MESH AWARENESS
+You are operating as part of a multi-agent squad in the Shinox Mesh. You are not alone.
+- If a task is outside your domain, say so — another specialist in the squad can handle it.
+- You may receive context or results from other agents. Use them faithfully.
+- Focus on YOUR specialty. Do not attempt tasks better suited to other agents.
+- If you need additional context or data from a previous stage to complete your task, \
+you may request it by starting your response with: \
+CONTEXT_REQUEST: <brief description of what context you need and why>. \
+The squad lead or another agent will provide the relevant information.
+
+## HONESTY RULES
+- NEVER fabricate data, statistics, live prices, exchange rates, or any information requiring real-time lookup.
+- If uncertain, say so explicitly. An honest "I'm not sure" is always better than a confident wrong answer.
+- If the request is unclear, ask for clarification rather than assuming."""
+
 # --- PROMPT TEMPLATE ---
 DIRECTOR_SYSTEM_PROMPT = """
 You are the "Chief of Staff" AI for a Decentralized Autonomous Organization. 
@@ -52,6 +70,8 @@ CORE RULES:
 1. **Minimalism:** Do not invite the whole company. Invite ONLY the agents whose capabilities match the intent.
 2. **Planner:** If the task is complex or multi-step, ALWAYS invite the 'agent-triage-lead' (Planner).
 3. **Context:** Write a "Briefing Note" that frames the problem clearly for the selected agents.
+4. **Worker Required:** NEVER create a squad with ONLY 'squad-lead-agent'. Always include at least one worker agent alongside the lead. The squad lead coordinates but does not execute tasks itself.
+5. **Presenter Required:** If the mission involves delivering a summary, report, or any user-facing output, ALWAYS include the generalist agent alongside the specialist(s). The specialist retrieves raw data; the generalist formats and presents the final result to the user.
 
 Here is your available Workforce (The Roster):
 {minified_roster_json}
@@ -77,6 +97,32 @@ class SquadAllocation(BaseModel):
     session_id: str
     selected_agents: list[str]
     briefing: str
+
+class AugmentationRequest(BaseModel):
+    session_id: str
+    required_capabilities: list[str]
+    current_squad_members: list[str] = []
+
+AUGMENTATION_PROMPT = """
+You are the "Chief of Staff" AI. The Squad Lead has reported a capability gap mid-mission and needs an additional agent.
+
+CURRENT SQUAD (already in the session): {current_squad}
+MISSING CAPABILITIES NEEDED: {required_capabilities}
+
+AVAILABLE WORKFORCE (agents NOT yet in the squad):
+{minified_roster_json}
+
+Your task: Identify the SINGLE best agent from the available workforce that can fill the missing capability.
+- Do NOT select any agent already in the current squad.
+- Prefer agents whose description explicitly matches the required capability.
+- If the missing capability is "presentation", "formatting", or "summarizing for end users", prefer the generalist agent.
+
+OUTPUT FORMAT (JSON ONLY):
+{{
+    "reasoning": "Brief explanation of why this agent was selected.",
+    "selected_agent_id": "exact-agent-id-from-roster"
+}}
+"""
 
 # --- LIFECYCLE ---
 @asynccontextmanager
@@ -308,8 +354,26 @@ async def dispatch_event(event: OrganizationalEvent):
     if "squad-lead-agent" not in selected_ids:
         selected_ids.append("squad-lead-agent")
 
+    # 4.2 Ensure at least one WORKER agent exists alongside the lead
+    worker_ids = [aid for aid in selected_ids if aid != "squad-lead-agent"]
+    if not worker_ids:
+        # Find generalist in roster, else pick first non-lead agent
+        fallback = None
+        for a in current_roster:
+            if a['id'] != "squad-lead-agent" and "generalist" in a['id']:
+                fallback = a['id']
+                break
+        if not fallback:
+            for a in current_roster:
+                if a['id'] != "squad-lead-agent":
+                    fallback = a['id']
+                    break
+        if fallback:
+            selected_ids.append(fallback)
+            logger.warning(f"Solo squad-lead detected. Auto-added worker: {fallback}")
+
     # 5. EXECUTION: The Wake Up Calls
-    
+
     # A. Send Invites to specific Agent Inboxes via Governance Router
     for agent_id in selected_ids:
         invite_id = str(uuid.uuid4())
@@ -325,7 +389,8 @@ async def dispatch_event(event: OrganizationalEvent):
                 "session_id": session_id,
                 "priority": decision.get("priority", "NORMAL"),
                 "session_title": title,
-                "session_briefing": decision['briefing_note']
+                "session_briefing": decision['briefing_note'],
+                "agent_context": AGENT_CONTEXT_INJECTION,
             }
         }
         # Topic: mesh.responses.pending -> Governance -> mesh.agent.{id}.inbox + mesh.global.events
@@ -339,14 +404,16 @@ async def dispatch_event(event: OrganizationalEvent):
         ]
         producer.send("mesh.responses.pending", value=invite_payload, headers=headers)
         logger.info(f"Invited {agent_id} to {session_id}")
-        
-    # B. Check and wait for "squad-lead-agent" to join (mocked with sleep here)
-    # In production, implement proper join acknowledgment logic
-    logger.info("Waiting for squad lead to join...")
-    time.sleep(5)  # Mock wait
-    logger.info("Squad lead has joined.")
 
-    # B. Post the Briefing to the Session Topic via Governance Router
+    # Flush invites to ensure they are delivered before proceeding
+    producer.flush(timeout=10)
+
+    # B. Wait for agents to join (allow time for Governance routing + subscription)
+    logger.info("Waiting for agents to join session...")
+    await asyncio.sleep(8)
+    logger.info("Proceeding with mission briefing.")
+
+    # C. Post the Briefing to the Session Topic via Governance Router
     # This sets the context for the agents once they join
     briefing_headers_dict = {
         "source_agent_id": "director",
@@ -354,7 +421,7 @@ async def dispatch_event(event: OrganizationalEvent):
         "conversation_id": session_id,
         "governance_status": "VERIFIED"
     }
-    
+
     briefing_payload = {
         "id": str(uuid.uuid4()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -381,6 +448,8 @@ async def dispatch_event(event: OrganizationalEvent):
         ("x-conversation-id", session_id.encode('utf-8'))
     ]
     producer.send("mesh.responses.pending", value=briefing_payload, headers=kafka_headers)
+    # Flush to ensure briefing is actually delivered to Kafka
+    producer.flush(timeout=10)
 
     return SquadAllocation(
         session_id=session_id,
@@ -389,11 +458,109 @@ async def dispatch_event(event: OrganizationalEvent):
     )
     
 
+@app.post("/augment")
+async def augment_squad(request: AugmentationRequest):
+    """
+    Called by the Squad Lead when it detects a capability gap mid-mission.
+    Queries the full agent registry, picks the best matching agent, and invites
+    them to the existing session so the Squad Lead can re-plan.
+    """
+    latest_roster = await fetch_roster()
+    current_roster = latest_roster if latest_roster else roster_data
+
+    current_ids = set(request.current_squad_members)
+    candidates = [a for a in current_roster if a["id"] not in current_ids]
+
+    if not candidates:
+        logger.warning(f"No augmentation candidates for session {request.session_id}")
+        raise HTTPException(status_code=404, detail="No available agents outside the current squad")
+
+    minified = [
+        {"id": a["id"], "role": a["role"], "capabilities": a["capabilities"], "description": a.get("description", "")}
+        for a in candidates
+    ]
+
+    try:
+        completion = openai_client.chat.completions.create(
+            model=OPENAI_MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": AUGMENTATION_PROMPT.format(
+                        current_squad=", ".join(request.current_squad_members) or "none",
+                        required_capabilities=", ".join(request.required_capabilities),
+                        minified_roster_json=json.dumps(minified, indent=2),
+                    ),
+                },
+                {"role": "user", "content": f"Find the best agent for: {', '.join(request.required_capabilities)}"},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+        )
+        decision = json.loads(completion.choices[0].message.content)
+    except Exception as e:
+        logger.error(f"LLM error during augmentation: {e}")
+        raise HTTPException(status_code=500, detail="Director Brain Malfunction during augmentation")
+
+    selected_id = decision.get("selected_agent_id", "")
+    valid_ids = {a["id"] for a in current_roster}
+
+    # Fallback if LLM hallucinated or selected someone already in the squad
+    if selected_id not in valid_ids or selected_id in current_ids:
+        selected_id = ""
+        for a in candidates:
+            if "generalist" in a["id"]:
+                selected_id = a["id"]
+                break
+        if not selected_id and candidates:
+            selected_id = candidates[0]["id"]
+
+    if not selected_id:
+        raise HTTPException(status_code=404, detail="Could not select a suitable augmentation agent")
+
+    # Invite the selected agent to the live session
+    correlation_id = str(uuid.uuid4())
+    invite_payload = {
+        "id": str(uuid.uuid4()),
+        "type": "SYSTEM_COMMAND",
+        "source": "Director",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "content": "You have been drafted for squad augmentation.",
+        "correlation_id": correlation_id,
+        "metadata": {
+            "command": "JOIN_SESSION",
+            "session_id": request.session_id,
+            "priority": "HIGH",
+            "session_title": f"Augmentation for {request.session_id}",
+            "session_briefing": (
+                f"You are being added to an active squad to cover a capability gap. "
+                f"Required: {', '.join(request.required_capabilities)}."
+            ),
+            "agent_context": AGENT_CONTEXT_INJECTION,
+        },
+    }
+    headers = [
+        ("x-source-agent", b"director"),
+        ("x-dest-topic", f"mesh.agent.{selected_id}.inbox,mesh.global.events".encode()),
+        ("x-interaction-type", b"SYSTEM_COMMAND"),
+        ("x-correlation-id", correlation_id.encode()),
+        ("x-conversation-id", request.session_id.encode()),
+    ]
+    producer.send("mesh.responses.pending", value=invite_payload, headers=headers)
+    producer.flush(timeout=10)
+
+    logger.info(
+        f"Augmented session {request.session_id} with {selected_id} "
+        f"(reason: {decision.get('reasoning', '')})"
+    )
+    return {"session_id": request.session_id, "added_agent": selected_id, "reasoning": decision.get("reasoning", "")}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        app=app, 
-        host="0.0.0.0", 
+        app=app,
+        host="0.0.0.0",
         port=8000,
         log_level="info"
     )

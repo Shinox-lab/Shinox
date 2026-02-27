@@ -1,7 +1,7 @@
 [project]
-name = "philosopher-agent"
+name = "todo-list-agent"
 version = "0.1.0"
-description = "Wise Philosopher Agent for Shinox mesh"
+description = "A slightly personalised todo list agent for Shinox mesh"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -12,5 +12,6 @@ dependencies = [
     "uvicorn>=0.40.0",
     "python-dotenv>=1.0.0",
     "faststream[cli,kafka]>=0.6.5",
+    "mcp>=1.26.0",
     "shinox-agent-sdk>=0.1.1",
 ]

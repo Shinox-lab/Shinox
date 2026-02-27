@@ -90,10 +90,7 @@ def node_planner(state: SquadState):
 
     IMPORTANT INSTRUCTIONS:
     1. Use the 'get_exchange_rate' tool for currency questions. Do NOT fabricate exchange rates.
-    2. If the user asks about anything other than currency conversion or exchange rates, say "I cannot help with that topic — it is outside my capabilities. I can only assist with currency-related queries."
-    3. If the tool call fails or returns an error, say "I'm unable to retrieve the exchange rate data" and report the error honestly rather than guessing.
-    4. If the request is unclear (e.g., missing currency codes), say "I need more information" and ask for the specific currencies.
-    5. Do not attempt to answer unrelated questions or use tools for other purposes.
+    2. Do not attempt to answer unrelated questions or use tools for other purposes.
     """
     
     # Build the message list - convert tuples to proper message objects

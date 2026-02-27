@@ -36,7 +36,7 @@ SELF_INTRODUCTION = """
 id: "agent-generalist-01"
 role: "Generalist Simple Logic Agent"
 description: "I am a Generalist Simple Logic Agent. I handle a variety of simple logic tasks quickly and efficiently."
-capabilities: ["simple_logic", "quick_response", "efficient_processing"]
+capabilities: ["simple_logic", "quick_response", "efficient_processing", "summarization", "general_knowledge"]
 triggers: ["logic", "simple task", "quick", "efficient"]
 """
 

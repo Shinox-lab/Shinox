@@ -26,9 +26,22 @@ We are pivoting from linear, brittle "Pipeline" orchestrations to a **Decentrali
 *   **Behavior:** It maintains "Context Window Hygiene." It effectively manages the token budget by summarizing history and filtering noise.
 *   **Technical Implementation:** Not a "Master" holding open sockets, but an **Event Emitter**. It uses an LLM to decompose goals into a DAG (Directed Acyclic Graph) of tasks and emits them as events.
 *   **Deadlock Resolution:** Detects loops (Agent A asks B, B asks A) and interrupts with a "Stop" command.
-TODO: Allow agent to able discover each other via the Agent Registry and communicate directly using A2A protocol without going back and forth with Squad Lead. And then need implement heauristics for squad lead to detect whether to intervene (mostly is the agent state status). And also integrate the agenet registry to the director agent for better agent selection.
-*  Task: able to break down task into sequential steps and assign to different agents directly. It also can support for parallel tasks that multiple agents can work on at the same time. Also some times (future), even for single task for specific agent, if it determine it needed to have multiple iteration, then it will also be able to break down into multiple sub tasks and assign to the same agent one by one.
-* Also can act as an aggregator 
+*   **Task Orchestration**: ✅ **IMPLEMENTED** - Sequential and parallel task execution with stage tracking (`current_stage_index`). Multiple tasks per agent supported with queue management.
+*   **Aggregation**: Can combine results from multiple agents for subsequent stages via context injection.
+
+**✅ Decentralized Coordination (IMPLEMENTED)**:
+* **Agent Discovery**: Agents discover each other via Agent Registry with semantic capability matching
+* **Direct P2P Communication**: Agents use A2A protocol (`GROUP_QUERY`, `PEER_REQUEST`, `PEER_RESPONSE`) to communicate directly without Squad Lead bottleneck
+* **Intelligent Intervention**: Squad Lead grants grace periods on `PEER_REQUEST`, only intervenes on timeout/failure
+* **Director-Registry Integration**: Director queries registry for real-time agent selection based on skills/capabilities
+* See §5.3 Multi-Agent Coordination Protocol for full details
+
+**✅ Squad Capability Gap Detection & Augmentation Loop (IMPLEMENTED)**:
+* **Gap Detection**: Squad Lead detects when the invited squad lacks required agent types (e.g., no presenter for user-facing output); emits `NEEDS_AUGMENTATION` state instead of proceeding with an incomplete plan
+* **Director Augmentation API**: Squad Lead sends HTTP POST to Director `/augment` endpoint; Director queries full agent registry, uses LLM to select the best match, and sends `JOIN_SESSION` invite via Kafka
+* **Re-Planning**: When the augmented agent sends `AGENT_JOINED`, Squad Lead resets to `PLANNING` state and re-plans with the full squad
+* **Executor Session Guard**: Before dispatching any task, executor validates target agents are session members; non-members trigger the augmentation loop instead of bypassed dispatch
+* **Planner Router**: Conditional LangGraph edge prevents executor from running when planner emits `NEEDS_AUGMENTATION`, avoiding false "Mission Accomplished" declarations
 
 ### 2.3 The Agent Workers (The Specialists)
 *   **Role:** Peer-to-Peer Collaborators (e.g., Coder, Researcher, DevOps).
@@ -1194,3 +1207,17 @@ Build intelligent knowledge retrieval and curation capabilities that enable agen
 | [ ] | **Innovation** | State-of-the-art agent performance benchmarks | $50M ARR, market leader position | 200K DAU, industry-defining workflows |
 
 ---
+
+
+
+<!-- To test use case -->
+Easy
+- Send Email
+- CRUD todo list
+- 
+
+Medium
+
+
+need capabilities of director able to continue on active session/conversation
+- [x] need capabilities of squad lead to intelligently check whether the session/conversation can be continued or straight end it 

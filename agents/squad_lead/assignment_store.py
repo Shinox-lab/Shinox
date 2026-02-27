@@ -142,3 +142,82 @@ class AssignmentStore:
             float(timeout_secs * 2),
         )
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Session continuity queries
+    # ------------------------------------------------------------------
+
+    async def get_pending_blockers(
+        self, conversation_id: str
+    ) -> List[Dict[str, Any]]:
+        """Return pending tasks and HITL requests that block session completion.
+
+        Queries ``tasks`` for rows still in-flight and ``hitl_requests``
+        for unresolved human approvals tied to this conversation.
+        """
+        blockers: List[Dict[str, Any]] = []
+
+        task_rows = await self._pool.fetch(
+            """
+            SELECT id, agent_id, title, status
+              FROM tasks
+             WHERE group_chat_name = $1
+               AND status IN ('PENDING', 'IN_PROGRESS', 'HITL_REVIEW')
+            """,
+            conversation_id,
+        )
+        for r in task_rows:
+            blockers.append({
+                "type": "task",
+                "id": str(r["id"]),
+                "agent_id": r["agent_id"],
+                "title": r["title"],
+                "status": r["status"],
+            })
+
+        hitl_rows = await self._pool.fetch(
+            """
+            SELECT id, agent_id, title, status
+              FROM hitl_requests
+             WHERE conversation_id = $1
+               AND status = 'PENDING'
+            """,
+            conversation_id,
+        )
+        for r in hitl_rows:
+            blockers.append({
+                "type": "hitl",
+                "id": str(r["id"]),
+                "agent_id": r["agent_id"],
+                "title": r["title"],
+                "status": r["status"],
+            })
+
+        return blockers
+
+    async def update_group_chat_status(
+        self, squad_name: str, status: str
+    ) -> None:
+        """Update the group_chat row to reflect the current session status."""
+        await self._pool.execute(
+            """
+            UPDATE group_chat
+               SET status = $2
+             WHERE squad_name = $1
+            """,
+            squad_name,
+            status,
+        )
+
+    async def get_expired_hitl_requests(self) -> List[Dict[str, Any]]:
+        """Return HITL requests that have passed their expiry deadline."""
+        rows = await self._pool.fetch(
+            """
+            SELECT id, conversation_id, agent_id, title, status, expires_at
+              FROM hitl_requests
+             WHERE status = 'PENDING'
+               AND expires_at IS NOT NULL
+               AND expires_at < NOW()
+            """,
+        )
+        return [dict(r) for r in rows]

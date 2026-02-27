@@ -1,10 +1,12 @@
 import logging
 import operator
 import os
-from typing import Annotated, List, TypedDict, Dict, Literal
+import re
+from typing import Annotated, Any, Callable, List, TypedDict, Dict, Literal, Optional
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import SystemMessage, BaseMessage
+# from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 
@@ -23,11 +25,13 @@ class SquadState(TypedDict):
     plan: List[List[str]]
     assignments: Dict[str, List[str]]  # agent_id -> list of task strings (supports multiple tasks per agent)
     available_squad_agents: List[str]
-    squad_status: Literal["IDLE", "PLANNING", "EXECUTING", "BLOCKED", "DONE", "UPDATING"]
+    squad_status: Literal["IDLE", "PLANNING", "EXECUTING", "BLOCKED", "DONE", "UPDATING", "NEEDS_AUGMENTATION", "WAITING_ASYNC", "WAITING_HITL"]
     next_actions: List[Dict[str, str]]
     # Track completed task results for context injection into subsequent stages
     completed_results: Dict[str, str]  # agent_id -> result content
     current_stage_index: int
+    capability_gaps: List[str]  # capabilities missing from the current squad
+    pending_blockers: List[Dict[str, str]]  # blockers preventing session completion
 
 
 # --- 2. LLM Instance ---
@@ -45,7 +49,15 @@ def node_monitor(state: SquadState):
     last_msg = state['messages'][-1]
     result = {}
 
-    if state.get("squad_status") == "UPDATING":
+    current = state.get("squad_status")
+
+    if current == "NEEDS_AUGMENTATION":
+        # A new agent joined to fill the gap — re-plan with the augmented squad
+        if "has joined session" in str(last_msg.content):
+            result = {"squad_status": "PLANNING"}
+        else:
+            result = {"squad_status": "NEEDS_AUGMENTATION"}
+    elif current == "UPDATING":
         result = {"squad_status": "UPDATING"}
     elif "having difficulty" in str(last_msg.content) or "need help" in str(last_msg.content).lower():
         result = {"squad_status": "UPDATING"}
@@ -53,8 +65,7 @@ def node_monitor(state: SquadState):
         result = {"squad_status": "PLANNING"}
     else:
         # If currently EXECUTING, we don't switch to IDLE automatically essentially blocking the loop
-        current = state.get("squad_status")
-        if current not in ["EXECUTING", "UPDATING", "PLANNING"]:
+        if current not in ["EXECUTING", "UPDATING", "PLANNING", "WAITING_ASYNC", "WAITING_HITL"]:
             result = {"squad_status": "IDLE"}
 
     return result
@@ -65,46 +76,82 @@ def node_planner(state: SquadState):
     The Strategic Thinker. Looks at history and generates/updates the DAG.
     """
     prompt = f"""
-    You are the Squad Lead, a COORDINATOR agent.
+    You are the Squad Lead — a strategic COORDINATOR agent responsible for breaking complex user requests into executable plans.
 
-    GOAL: Break down the user's request into a sequence of STAGES.
+    YOUR ROLE: Decompose tasks and delegate them to specialist worker agents. You NEVER perform tasks yourself.
 
     AVAILABLE AGENTS (format: "agent-id: description of capabilities"):
     {chr(10).join('- ' + a for a in state['available_squad_agents'])}
 
     CURRENT PLAN: {state.get('plan', [])}
     LATEST REQUEST: {state['messages'][-1].content}
-
-    CRITICAL RULES:
-    1. You are ONLY a coordinator - NEVER assign tasks to yourself (squad-lead-agent).
-    2. Delegate ALL work to the available worker agents.
-    3. MATCH each task to the agent whose DESCRIPTION best fits that task.
-       - Currency/math/finance tasks → agent with accounting/finance in description
-       - General knowledge/facts/geography → agent with generalist/general-purpose in description
-       - Summarizing/combining multiple results → generalist agent
-    4. If NO specialist matches a task, assign it to the generalist agent.
-    5. Tasks in the same STAGE run in PARALLEL.
-    6. Tasks in later stages depend on earlier stages.
+    
+    PLANNING RULES:
+    1. You are ONLY a coordinator — NEVER assign tasks to yourself (squad-lead-agent).
+    2. Delegate ALL work to the available worker agents listed above.
+    3. MATCH each task to the agent whose DESCRIPTION best fits that task. Read descriptions carefully — do not assume capabilities.
+    4. If NO specialist matches a task, assign it to the most general-purpose agent available.
+    5. Tasks within the same STAGE run in PARALLEL — group independent tasks together.
+    6. Tasks in later STAGES depend on results from earlier stages — use stages for sequential dependencies.
     7. Use ONLY the exact agent-id from the list above (the part before the colon).
+    8. Keep the plan efficient — use the fewest stages necessary, but do NOT collapse stages at the expense of quality. A specialist retrieving raw data and a generalist presenting it to the user are always two separate concerns.
+    9. Each instruction must be self-contained and specific enough for the worker to execute without guessing.
+    10. When the final output is a user-facing summary, report, or explanation, ALWAYS add a final stage assigning the generalist agent to present the results clearly — even if an earlier specialist produced a raw version.
 
-    FORMAT:
-    STAGE
-    agent-id: instruction
-    agent-id: instruction
-    STAGE
-    agent-id: instruction
+    ERROR HANDLING:
+    11. If the request is ambiguous, create a single-stage plan with the generalist agent asking the user for clarification.
+    12. If no available agent can handle the request, output a single stage with the generalist agent explaining the limitation.
 
-    Example Output:
+    OUTPUT FORMAT (strict):
     STAGE
-    accounting-specialist-agent: Convert 1000 USD to MYR
+    agent-id: clear, specific instruction
+    agent-id: clear, specific instruction
     STAGE
-    generalist-simple-logic-agent: Summarize the conversion result for the user
+    agent-id [needs: source-agent-id-1, source-agent-id-2]: instruction that depends on their results
+    agent-id: instruction that needs no prior context
+
+    The [needs: ...] annotation is REQUIRED for tasks in Stage 2+ that depend on results from earlier stages.
+    List ONLY the agent IDs whose output is actually needed — do not include all previous agents.
+    Omit [needs: ...] entirely for tasks that are independent (e.g., Stage 1 tasks, or parallel tasks with no dependency).
+
+    EXAMPLE:
+    STAGE
+    accounting-specialist-agent: Convert 1000 USD to MYR using the current exchange rate
+    STAGE
+    generalist-simple-logic-agent [needs: accounting-specialist-agent]: Summarize the conversion result in a user-friendly sentence
+
+    CAPABILITY GAP DETECTION:
+    13. Before finalizing the plan, check that every required agent type is present in AVAILABLE AGENTS.
+    14. If Rule 10 requires a generalist/presenter agent for user-facing output but NO such agent appears in AVAILABLE AGENTS, do NOT force the task onto a specialist. Instead output ONLY this exact format (no STAGE lines):
+        NEEDS_AUGMENTATION
+        missing: general-purpose agent for formatting and presenting results to end users
+
+    TONE: Decisive, efficient, and precise. You are a mission planner, not a conversationalist.
     """
 
     response = llm.invoke([SystemMessage(content=prompt)])
 
+    response_text = response.content.strip()
+
+    # Check for capability gap signal before normal parsing
+    if response_text.startswith("NEEDS_AUGMENTATION"):
+        missing = ""
+        for line in response_text.split("\n"):
+            line = line.strip()
+            if line.startswith("missing:"):
+                missing = line.split(":", 1)[1].strip()
+                break
+        return {
+            "plan": [],
+            "squad_status": "NEEDS_AUGMENTATION",
+            "capability_gaps": [missing] if missing else ["general-purpose presentation agent"],
+            "current_stage_index": 0,
+        }
+
     # Parse the LLM response into List[List[str]]
-    raw_lines = response.content.strip().split("\n")
+    # Each task line may contain a [needs: agent-1, agent-2] annotation
+    # which is preserved in the plan for the executor to use
+    raw_lines = response_text.split("\n")
     new_plan = []
     current_stage = []
 
@@ -148,15 +195,14 @@ def node_executor(state: SquadState):
     new_actions = []
     new_assignments = assignments.copy()
 
-    # Build context from completed results if any exist
-    context_block = ""
-    if completed_results:
-        context_lines = ["## Previous Results from Squad Members:\n"]
-        for agent_id, result in completed_results.items():
-            # Truncate very long results to avoid token explosion
-            truncated = result[:2000] + "..." if len(result) > 2000 else result
-            context_lines.append(f"### {agent_id}:\n{truncated}\n")
-        context_block = "\n".join(context_lines) + "\n---\n\n"
+    # Build the set of agent IDs that are actually in this session's squad
+    session_agent_ids = {
+        (a.split(":")[0].strip() if ":" in a else a.strip())
+        for a in state.get("available_squad_agents", [])
+    }
+
+    # Regex to extract [needs: agent-1, agent-2] annotation from task lines
+    _needs_pattern = re.compile(r'\[needs:\s*([^\]]+)\]')
 
     # Track which tasks in this stage are already assigned (by full task string)
     already_assigned_tasks = set()
@@ -164,24 +210,99 @@ def node_executor(state: SquadState):
         already_assigned_tasks.update(task_list)
 
     for task in current_stage:
-        if ":" in task:
-            target_id, instruction = task.split(":", 1)
-            target_id = target_id.strip()
+        if ":" not in task:
+            continue
 
-            if task not in already_assigned_tasks:
-                # Inject context for tasks that likely need it (summarize, combine, etc.)
-                final_instruction = instruction.strip()
-                if context_block:
+        # Parse: "agent-id [needs: dep-1, dep-2]: instruction"
+        # The first colon after the agent-id (and optional [needs:]) splits target from instruction
+        needs_match = _needs_pattern.search(task)
+        needed_agents = []
+        if needs_match:
+            needed_agents = [a.strip() for a in needs_match.group(1).split(",")]
+            # Remove the [needs: ...] from the task line before splitting on ":"
+            clean_task = task[:needs_match.start()] + task[needs_match.end():]
+        else:
+            clean_task = task
+
+        if ":" not in clean_task:
+            continue
+
+        target_id, instruction = clean_task.split(":", 1)
+        target_id = target_id.strip()
+
+        # Guard: if the planner assigned a task to an agent that was never invited
+        # to the session, do NOT dispatch directly. Instead, surface a capability gap
+        # so the Director can properly invite the agent via the augmentation flow.
+        if target_id != "squad-lead-agent" and target_id not in session_agent_ids:
+            logger.warning(
+                f"Executor blocked dispatch to '{target_id}' — agent is not a session member. "
+                f"Triggering augmentation request."
+            )
+            return {
+                "plan": plan,
+                "next_actions": [],
+                "squad_status": "NEEDS_AUGMENTATION",
+                "capability_gaps": [
+                    f"agent '{target_id}' required for: {instruction.strip()[:120]}"
+                ],
+                "current_stage_index": current_stage_index,
+            }
+
+        if task not in already_assigned_tasks:
+            final_instruction = instruction.strip()
+
+            # Build targeted context: only inject results from agents this task depends on
+            if needed_agents and completed_results:
+                context_lines = ["## Context from Previous Stage:\n"]
+                for dep_id in needed_agents:
+                    if dep_id in completed_results:
+                        result = completed_results[dep_id]
+                        truncated = result[:2000] + "..." if len(result) > 2000 else result
+                        context_lines.append(f"### {dep_id}:\n{truncated}\n")
+                if len(context_lines) > 1:  # Has actual results beyond the header
+                    context_block = "\n".join(context_lines) + "\n---\n\n"
                     final_instruction = f"{context_block}**Your Task:** {final_instruction}"
 
-                new_actions.append({
-                    "target": target_id,
-                    "instruction": final_instruction
-                })
-                # Append to the agent's task list (supports multiple tasks per agent)
-                if target_id not in new_assignments:
-                    new_assignments[target_id] = []
-                new_assignments[target_id].append(task)
+            new_actions.append({
+                "target": target_id,
+                "instruction": final_instruction,
+                "context_provided": bool(needed_agents and completed_results),
+            })
+            # Append to the agent's task list (supports multiple tasks per agent)
+            if target_id not in new_assignments:
+                new_assignments[target_id] = []
+            new_assignments[target_id].append(task)
+
+    # Filter out self-assignments (squad-lead-agent should never assign to itself)
+    filtered_actions = []
+    for action in new_actions:
+        if action["target"] == "squad-lead-agent":
+            # Try to find a fallback worker
+            fallback = None
+            for agent_entry in state.get('available_squad_agents', []):
+                aid = agent_entry.split(":")[0].strip() if ":" in agent_entry else agent_entry.strip()
+                if aid != "squad-lead-agent":
+                    if not fallback or "generalist" in aid:
+                        fallback = aid
+            if fallback:
+                action["target"] = fallback
+                filtered_actions.append(action)
+                logger.warning(f"Self-assignment redirected to {fallback}")
+            else:
+                logger.error("Self-assignment with no fallback agent available")
+        else:
+            filtered_actions.append(action)
+
+    new_actions = filtered_actions
+
+    # If all actions were self-assignments and no fallback exists → BLOCKED
+    if not new_actions and not plan:
+        return {
+            "next_actions": [],
+            "squad_status": "BLOCKED",
+            "assignments": new_assignments,
+            "current_stage_index": current_stage_index,
+        }
 
     result = {
         "next_actions": new_actions,
@@ -341,7 +462,44 @@ def node_updater(state: SquadState):
     return result
 
 
-# --- 5. The Router ---
+# --- 4b. Session Continuity Check ---
+
+async def node_continuity_check(state: SquadState, config: dict):
+    """Deterministic gate that queries the DB for pending blockers before
+    allowing the session to finalize as DONE.  No LLM call — pure DB query.
+
+    The actual query function is injected via ``config["configurable"]["continuity_checker"]``
+    so the node stays testable without a real database.
+    """
+    if state.get("squad_status") != "DONE":
+        return {}
+
+    configurable = config.get("configurable", {})
+    checker: Optional[Callable] = configurable.get("continuity_checker")
+
+    if checker is None:
+        # No checker injected (e.g. in-memory mode) — let DONE pass through
+        return {}
+
+    conversation_id = configurable.get("thread_id", "")
+    blockers: List[Dict[str, Any]] = await checker(conversation_id)
+
+    if not blockers:
+        return {}
+
+    has_hitl = any(b.get("type") == "hitl" for b in blockers)
+    new_status = "WAITING_HITL" if has_hitl else "WAITING_ASYNC"
+
+    return {
+        "squad_status": new_status,
+        "pending_blockers": [
+            {"type": b.get("type", ""), "id": b.get("id", ""), "title": b.get("title", ""), "status": b.get("status", "")}
+            for b in blockers
+        ],
+    }
+
+
+# --- 5. The Routers ---
 
 def router(state: SquadState):
     """Route to the next node based on squad status."""
@@ -354,8 +512,19 @@ def router(state: SquadState):
         next_node = "updater"
     elif status == "EXECUTING":
         next_node = "executor"
+    elif status == "NEEDS_AUGMENTATION":
+        next_node = END  # main.py handles the Director callback
+    elif status in ("WAITING_ASYNC", "WAITING_HITL"):
+        next_node = END  # don't re-process while waiting
 
     return next_node
+
+
+def planner_router(state: SquadState):
+    """After the planner runs, skip the executor if a capability gap was detected."""
+    if state.get("squad_status") == "NEEDS_AUGMENTATION":
+        return END
+    return "executor"
 
 
 # --- 6. Build the Graph ---
@@ -368,19 +537,24 @@ def _build_workflow() -> StateGraph:
     wf.add_node("planner", node_planner)
     wf.add_node("updater", node_updater)
     wf.add_node("executor", node_executor)
+    wf.add_node("continuity_check", node_continuity_check)
 
     wf.set_entry_point("monitor")
 
     wf.add_conditional_edges("monitor", router)
-    wf.add_edge("planner", "executor")
+    wf.add_conditional_edges("planner", planner_router)
     wf.add_edge("updater", "executor")
-    wf.add_edge("executor", END)
+    wf.add_edge("executor", "continuity_check")
+    wf.add_edge("continuity_check", END)
 
     return wf
 
 
 # Default compile with MemorySaver (backward compatible — works without Postgres)
 brain = _build_workflow().compile(checkpointer=MemorySaver())
+
+# Hold a reference to the connection pool so it can be closed on shutdown
+_pg_pool = None
 
 
 async def initialize_persistent_brain(database_url: str) -> None:
@@ -390,12 +564,29 @@ async def initialize_persistent_brain(database_url: str) -> None:
     call-site that accesses ``brain_module.brain`` picks up the new
     persistent graph.
     """
-    global brain
+    global brain, _pg_pool
 
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg_pool import AsyncConnectionPool
 
-    checkpointer = AsyncPostgresSaver.from_conn_string(database_url)
+    _pg_pool = AsyncConnectionPool(
+        conninfo=database_url,
+        open=False,
+        kwargs={"autocommit": True},
+    )
+    await _pg_pool.open()
+
+    checkpointer = AsyncPostgresSaver(_pg_pool)
     await checkpointer.setup()  # auto-creates checkpoint tables if missing
 
     brain = _build_workflow().compile(checkpointer=checkpointer)
     logger.info("Brain re-compiled with PostgreSQL checkpointer")
+
+
+async def close_persistent_brain() -> None:
+    """Close the PostgreSQL connection pool."""
+    global _pg_pool
+    if _pg_pool:
+        await _pg_pool.close()
+        _pg_pool = None
+        logger.info("PostgreSQL checkpointer pool closed")

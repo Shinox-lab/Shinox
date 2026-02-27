@@ -192,12 +192,20 @@ class AgentRegistration(BaseModel):
     metadata: Optional[Dict] = Field(default={}, description="Optional metadata")
     card: Optional[Dict] = Field(default=None, description="The full agent card. If provided, registry skips fetching from URL.")
 
+class SkillSummary(BaseModel):
+    """Compact skill representation for discovery responses."""
+    id: str
+    name: str
+    description: str = ""
+    tags: List[str] = []
+
+
 class AgentInfo(BaseModel):
     agent_id: str
     agent_url: str
     agent_name: str
     description: str
-    skills: List[str]
+    skills: List[SkillSummary]
     registered_at: str
     last_health_check: Optional[str] = None
     status: str = "active"
@@ -552,12 +560,25 @@ async def discover_agents(
         metadata = parse_jsonb(row['metadata'])
         agent_url = metadata.get("agent_url") or row['a2a_endpoint'] or ""
 
+        # Build rich skill summaries so coordinators can make informed dispatch decisions
+        skill_summaries = []
+        for sname, sdetail in skills_data.items():
+            if isinstance(sdetail, dict):
+                skill_summaries.append(SkillSummary(
+                    id=sdetail.get("id", sname),
+                    name=sdetail.get("name", sname),
+                    description=sdetail.get("description", ""),
+                    tags=sdetail.get("tags", []),
+                ))
+            else:
+                skill_summaries.append(SkillSummary(id=sname, name=sname))
+
         filtered_agents[row['agent_id']] = AgentInfo(
             agent_id=row['agent_id'],
             agent_url=agent_url,
             agent_name=row['name'],
             description=row['description'] or "",
-            skills=skill_names,
+            skills=skill_summaries,
             registered_at=row['created_at'].isoformat() if row['created_at'] else "",
             last_health_check=row['last_heartbeat_at'].isoformat() if row['last_heartbeat_at'] else None,
             status=row['status'] or "active"

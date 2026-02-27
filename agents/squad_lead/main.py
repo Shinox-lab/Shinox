@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 from typing import Optional
+import httpx
 
 from langchain_core.messages import HumanMessage
 from shinox_agent import ShinoxAgent, AgentMessage, A2AHeaders
@@ -28,6 +29,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 TASK_TIMEOUT_SECONDS = int(os.getenv("SQUAD_TASK_TIMEOUT", "120"))
 CHECK_INTERVAL_SECONDS = int(os.getenv("SQUAD_CHECK_INTERVAL", "30"))
 COLLABORATION_GRACE_SECONDS = int(os.getenv("SQUAD_COLLABORATION_GRACE", "90"))
+DIRECTOR_URL = os.getenv("DIRECTOR_URL", "http://director:8000")
 
 # --- Persistent state (initialised at startup when DATABASE_URL is set) ---
 _assignment_store: Optional[AssignmentStore] = None
@@ -126,6 +128,11 @@ async def handle_brain_output(final_state: dict, initial_status: str, headers: A
             target_agent = action['target']
             instruction = action['instruction']
 
+            # Defense-in-depth: skip self-assignments that slipped through the brain filter
+            if target_agent == agent.agent_id:
+                logger.warning(f"Skipping self-assignment: {instruction[:100]}")
+                continue
+
             target_topic = await agent.resolve_agent_inbox(target_agent)
 
             task_headers = A2AHeaders(
@@ -135,8 +142,13 @@ async def handle_brain_output(final_state: dict, initial_status: str, headers: A
                 conversation_id=conversation_id
             )
 
+            # Signal to worker that context is already injected (skip auto-history)
+            task_metadata = {}
+            if action.get("context_provided"):
+                task_metadata["context_provided"] = True
+
             await agent.broker.publish(
-                AgentMessage(content=instruction, headers=task_headers),
+                AgentMessage(content=instruction, headers=task_headers, metadata=task_metadata),
                 topic=target_topic,
                 headers={
                     "x-source-agent": agent.agent_id,
@@ -171,6 +183,68 @@ async def handle_brain_output(final_state: dict, initial_status: str, headers: A
             "Please provide guidance, clarify the mission, or check agent availability."
         )
         await agent.publish_update(content, conversation_id, "INFO_UPDATE")
+
+    elif squad_status == "WAITING_ASYNC":
+        pending = final_state.get("pending_blockers", [])
+        task_summary = ", ".join(
+            f"{b.get('title', 'unknown')} ({b.get('status', '?')})" for b in pending
+        ) or "pending worker tasks"
+        content = (
+            "## Waiting for Async Tasks\n\n"
+            f"All planned stages are complete, but **{len(pending)}** task(s) are still in-flight:\n"
+            f"{task_summary}\n\n"
+            "Session will resume automatically when results arrive."
+        )
+        await agent.publish_update(content, conversation_id, "INFO_UPDATE")
+        if _assignment_store:
+            await _assignment_store.update_group_chat_status(conversation_id, "WAITING_ASYNC")
+
+    elif squad_status == "WAITING_HITL":
+        pending = final_state.get("pending_blockers", [])
+        hitl_items = [b for b in pending if b.get("type") == "hitl"]
+        hitl_summary = ", ".join(
+            f"{b.get('title', 'unknown')}" for b in hitl_items
+        ) or "pending HITL approval(s)"
+        content = (
+            "## Waiting for Human Approval\n\n"
+            f"All planned stages are complete, but **{len(hitl_items)}** HITL request(s) need human review:\n"
+            f"{hitl_summary}\n\n"
+            "Session will resume when approvals are granted."
+        )
+        await agent.publish_update(content, conversation_id, "INFO_UPDATE")
+        if _assignment_store:
+            await _assignment_store.update_group_chat_status(conversation_id, "WAITING_HITL")
+
+    elif squad_status == "NEEDS_AUGMENTATION":
+        gaps = final_state.get("capability_gaps", ["general-purpose presentation agent"])
+        gap_str = ", ".join(gaps)
+        await agent.publish_update(
+            f"**Squad Capability Gap Detected**\n\n"
+            f"The current squad cannot complete the mission. Missing: **{gap_str}**.\n\n"
+            f"Requesting Director to find a suitable agent from the full registry...",
+            conversation_id,
+            "INFO_UPDATE",
+        )
+        current_squad = [a.split(":")[0].strip() for a in final_state.get("available_squad_agents", [])]
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"{DIRECTOR_URL}/augment",
+                    json={
+                        "session_id": conversation_id,
+                        "required_capabilities": gaps,
+                        "current_squad_members": current_squad,
+                    },
+                    timeout=15.0,
+                )
+            logger.info(f"[{agent.agent_id}] Augmentation request sent to Director for {conversation_id}")
+        except Exception as e:
+            logger.error(f"[{agent.agent_id}] Failed to reach Director for augmentation: {e}")
+            await agent.publish_update(
+                "**Warning:** Could not reach Director to request squad augmentation. Mission may stall.",
+                conversation_id,
+                "INFO_UPDATE",
+            )
 
     # 4. Fallback: Generic Response
     messages = final_state.get("messages", [])
@@ -254,6 +328,8 @@ async def session_event_handler(msg: AgentMessage, agent: ShinoxAgent):
         should_wake_up = True
     if headers.interaction_type == "GROUP_QUERY":
         should_wake_up = True
+    if headers.interaction_type == "HITL_RESOLVED":
+        should_wake_up = True
     for trigger in agent.triggers:
         if trigger in msg.content:
             should_wake_up = True
@@ -276,10 +352,13 @@ async def session_event_handler(msg: AgentMessage, agent: ShinoxAgent):
     # --- Invoke the Brain ---
 
     config = {"configurable": {"thread_id": headers.conversation_id}}
+    if _assignment_store:
+        config["configurable"]["continuity_checker"] = _assignment_store.get_pending_blockers
 
     # 1. Check existing state
     current_state = await brain_module.brain.aget_state(config)
     existing_agents = current_state.values.get("available_squad_agents", []) if current_state and current_state.values else []
+    current_squad_status = current_state.values.get("squad_status") if current_state and current_state.values else None
 
     squad_agents = []
 
@@ -304,21 +383,48 @@ async def session_event_handler(msg: AgentMessage, agent: ShinoxAgent):
         squad_agents = await agent.fetch_available_agents()
 
     # Determine state inputs
-    state_input = {
-        "messages": [lc_msg],
-        "available_squad_agents": squad_agents,
-    }
-
-    if headers.interaction_type == "TASK_RESULT":
-        state_input["squad_status"] = "UPDATING"
-
-    if headers.interaction_type in ("PEER_REQUEST", "GROUP_QUERY"):
-        state_input["squad_status"] = "UPDATING"
-
-    initial_status = "UPDATING" if headers.interaction_type in ("TASK_RESULT", "PEER_REQUEST", "GROUP_QUERY") else "IDLE"
+    # Special case: a new agent just joined to fill a capability gap — augment the squad and re-plan
+    if headers.interaction_type == "AGENT_JOINED" and current_squad_status == "NEEDS_AUGMENTATION":
+        new_agent_id = headers.source_agent_id
+        existing_ids = {a.split(":")[0].strip() for a in squad_agents}
+        if new_agent_id and new_agent_id not in existing_ids:
+            all_agents = await agent.fetch_available_agents(exclude_self=False)
+            matched = next(
+                (a for a in all_agents if a.split(":")[0].strip() == new_agent_id),
+                new_agent_id,
+            )
+            squad_agents = list(squad_agents) + [matched]
+        state_input = {
+            "messages": [lc_msg],
+            "available_squad_agents": squad_agents,
+            "squad_status": "PLANNING",
+            "capability_gaps": [],
+        }
+        initial_status = "IDLE"
+    else:
+        state_input = {
+            "messages": [lc_msg],
+            "available_squad_agents": squad_agents,
+        }
+        if headers.interaction_type == "TASK_RESULT":
+            state_input["squad_status"] = "UPDATING"
+        if headers.interaction_type in ("PEER_REQUEST", "GROUP_QUERY"):
+            state_input["squad_status"] = "UPDATING"
+        if headers.interaction_type == "HITL_RESOLVED":
+            state_input["squad_status"] = "UPDATING"
+        initial_status = "UPDATING" if headers.interaction_type in ("TASK_RESULT", "PEER_REQUEST", "GROUP_QUERY", "HITL_RESOLVED") else "IDLE"
 
     # Run the graph
-    final_state = await brain_module.brain.ainvoke(state_input, config=config)
+    try:
+        final_state = await brain_module.brain.ainvoke(state_input, config=config)
+    except Exception as e:
+        logger.error(f"[{my_id}] Brain invocation failed: {e}", exc_info=True)
+        await agent.publish_update(
+            f"Squad Lead encountered an internal error while processing: {e}",
+            headers.conversation_id,
+            "INFO_UPDATE"
+        )
+        return
 
     # --- Dispatch Actions ---
     await handle_brain_output(final_state, initial_status, headers, agent)
@@ -409,6 +515,43 @@ async def _task_timeout_monitor(agent_instance: ShinoxAgent):
                     logger.error(f"[{agent_instance.agent_id}] Re-delegation failed: {e}")
                     await _assignment_store.remove_assignment(conversation_id, agent_id)
 
+            # Expired HITL requests: auto-resolve by feeding through brain
+            expired_hitl = await _assignment_store.get_expired_hitl_requests()
+            for row in expired_hitl:
+                hitl_id = row["id"]
+                conversation_id = row["conversation_id"]
+                agent_id = row.get("agent_id", "unknown")
+                title = row.get("title", "HITL request")
+                logger.warning(
+                    f"[{agent_instance.agent_id}] HITL request {hitl_id} expired "
+                    f"in conversation {conversation_id}. Synthesizing update."
+                )
+                try:
+                    config = {"configurable": {"thread_id": conversation_id}}
+                    if _assignment_store:
+                        config["configurable"]["continuity_checker"] = _assignment_store.get_pending_blockers
+                    expired_msg = HumanMessage(
+                        content=(
+                            f"HITL request '{title}' (id: {hitl_id}) has expired without human approval. "
+                            f"Original agent: {agent_id}. Please re-evaluate session status."
+                        ),
+                        name=agent_id,
+                    )
+                    state_input = {
+                        "messages": [expired_msg],
+                        "squad_status": "UPDATING",
+                    }
+                    final_state = await brain_module.brain.ainvoke(state_input, config=config)
+
+                    synthetic_headers = A2AHeaders(
+                        source_agent_id=agent_id,
+                        interaction_type="TASK_RESULT",
+                        conversation_id=conversation_id,
+                    )
+                    await handle_brain_output(final_state, "UPDATING", synthetic_headers, agent_instance)
+                except Exception as e:
+                    logger.error(f"[{agent_instance.agent_id}] Expired HITL handling failed: {e}")
+
         except asyncio.CancelledError:
             logger.debug(f"[{agent_instance.agent_id}] Task timeout monitor cancelled")
             raise
@@ -457,6 +600,9 @@ async def _on_shutdown():
         except asyncio.CancelledError:
             pass
         logger.info(f"[{agent.agent_id}] Task timeout monitor stopped")
+
+    # Close brain's PostgreSQL pool
+    await brain_module.close_persistent_brain()
 
     # Close assignment store pool
     if _assignment_store:
