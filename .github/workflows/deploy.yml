@@ -155,6 +155,10 @@ jobs:
           IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
           REPO: ${{ env.REPO_LC }}
         run: |
+          # 0. Trim whitespace from IMAGE_TAG
+          IMAGE_TAG="$(echo -n "$IMAGE_TAG" | xargs)"
+          export IMAGE_TAG
+
           # 1. Install envsubst
           sudo apt-get install -y gettext-base
 
@@ -164,11 +168,8 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
 
-          # 3. Debug: show envsubst output and remote Docker version
-          echo "=== Processed compose.yaml (first 5 lines) ==="
-          envsubst '$IMAGE_TAG $REPO' < infra/compose.yaml | head -5
-          echo "=== Line 179 of processed compose.yaml ==="
-          envsubst '$IMAGE_TAG $REPO' < infra/compose.yaml | sed -n '176,182p'
+          # 3. Debug: verify variables
+          echo "IMAGE_TAG=[$IMAGE_TAG] REPO=[$REPO]"
 
           # 4. Inject REPO and IMAGE_TAG into compose.yaml, then deploy via SSH
           envsubst '$IMAGE_TAG $REPO' < infra/compose.yaml | ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
