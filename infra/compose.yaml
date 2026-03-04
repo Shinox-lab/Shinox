@@ -176,9 +176,6 @@ services:
 
   # Agent Registry - Discovery Service
   agent-registry:
-    build:
-      context: ../
-      dockerfile: infra/Dockerfile.agent-registry
     image: ${REPO}/agent-registry:${IMAGE_TAG}
     container_name: agent-registry
     hostname: agent-registry
@@ -203,9 +200,6 @@ services:
 
   # Squad Lead - A2A Agent Server
   squad-lead-agent:
-    build:
-      context: ../
-      dockerfile: infra/Dockerfile.squad-lead-agent
     image: ${REPO}/squad-lead-agent:${IMAGE_TAG}
     container_name: squad-lead-agent
     hostname: squad-lead-agent
@@ -225,9 +219,6 @@ services:
 
   # Governance Service
   governance:
-    build:
-      context: ../
-      dockerfile: infra/Dockerfile.governance
     image: ${REPO}/governance:${IMAGE_TAG}
     container_name: governance
     hostname: governance
@@ -242,9 +233,6 @@ services:
 
   # Director Service
   director:
-    build:
-      context: ../
-      dockerfile: infra/Dockerfile.director
     image: ${REPO}/director:${IMAGE_TAG}
     container_name: director
     hostname: director
@@ -282,9 +270,6 @@ services:
 
   # Kafka to DB Ingestor
   kafka2db:
-    build:
-      context: ../
-      dockerfile: infra/Dockerfile.kafka2db
     image: ${REPO}/kafka2db:${IMAGE_TAG}
     container_name: kafka2db
     hostname: kafka2db
@@ -304,9 +289,6 @@ services:
       - init-redpanda
 
   accounting-agent:
-    build:
-      context: ../
-      dockerfile: infra/Dockerfile.accounting-agent
     image: ${REPO}/accounting-agent:${IMAGE_TAG}
     container_name: accounting-agent
     hostname: accounting-agent
@@ -323,9 +305,6 @@ services:
       - agent-registry
 
   general-fast-agent:
-    build:
-      context: ../
-      dockerfile: infra/Dockerfile.general-fast-agent
     image: ${REPO}/general-fast-agent:${IMAGE_TAG}
     container_name: general-fast-agent
     hostname: general-fast-agent
@@ -342,9 +321,6 @@ services:
       - agent-registry
 
   philosopher-agent:
-    build:
-      context: ../
-      dockerfile: infra/Dockerfile.philosopher-agent
     image: ${REPO}/philosopher-agent:${IMAGE_TAG}
     container_name: philosopher-agent
     hostname: philosopher-agent
@@ -361,9 +337,6 @@ services:
       - agent-registry
 
   todo-list-agent:
-    build:
-      context: ../
-      dockerfile: infra/Dockerfile.todo-list-agent
     image: ${REPO}/todo-list-agent:${IMAGE_TAG}
     container_name: todo-list-agent
     hostname: todo-list-agent
@@ -386,9 +359,6 @@ services:
   # API GATEWAY (Frontend Backend)
   # ==========================================
   api-gateway:
-    build:
-      context: ../
-      dockerfile: infra/Dockerfile.api-gateway
     image: ${REPO}/api-gateway:${IMAGE_TAG}
     container_name: api-gateway
     hostname: api-gateway
@@ -414,9 +384,6 @@ services:
   # DASHBOARD (Next.js Frontend)
   # ==========================================
   dashboard:
-    build:
-      context: ../
-      dockerfile: infra/Dockerfile.dashboard
     image: ${REPO}/dashboard:${IMAGE_TAG}
     container_name: dashboard
     hostname: dashboard

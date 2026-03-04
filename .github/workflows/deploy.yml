@@ -164,16 +164,8 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
 
-          # 3. Inject REPO and IMAGE_TAG into compose.yaml
-          #    Remove 'build:' blocks (unsupported by docker stack deploy)
-          envsubst '$IMAGE_TAG $REPO' < infra/compose.yaml \
-            | grep -v '^\s*build:' \
-            | grep -v '^\s*context:.*\.\./' \
-            | grep -v '^\s*dockerfile:.*Dockerfile\.' \
-            > /tmp/deploy-compose.yaml
-
-          # 4. Deploy via SSH
-          cat /tmp/deploy-compose.yaml | ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+          # 3. Inject REPO and IMAGE_TAG into compose.yaml, then deploy via SSH
+          envsubst '$IMAGE_TAG $REPO' < infra/compose.yaml | ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
           "cat > /tmp/compose.yaml && \
            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin && \
            docker stack deploy --with-registry-auth -c /tmp/compose.yaml shinox"
