@@ -3,6 +3,17 @@ name: Production Deployment (Docker Swarm)
 on:
   push:
     branches: [ main ] # Only deploy when code is pushed to main
+  workflow_dispatch:
+    inputs:
+      skip_build:
+        description: 'Skip build steps (use existing images)'
+        required: false
+        type: boolean
+        default: false
+      image_tag:
+        description: 'Image tag to deploy (commit SHA). Required when skipping build.'
+        required: false
+        type: string
 
 jobs:
   build-and-deploy:
@@ -36,6 +47,7 @@ jobs:
       # ==========================================
 
       - name: Build and Push agent-registry
+        if: ${{ github.event.inputs.skip_build != 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -44,6 +56,7 @@ jobs:
           tags: ${{ env.REPO_LC }}/agent-registry:${{ github.sha }}
 
       - name: Build and Push squad-lead-agent
+        if: ${{ github.event.inputs.skip_build != 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -52,6 +65,7 @@ jobs:
           tags: ${{ env.REPO_LC }}/squad-lead-agent:${{ github.sha }}
 
       - name: Build and Push governance
+        if: ${{ github.event.inputs.skip_build != 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -60,6 +74,7 @@ jobs:
           tags: ${{ env.REPO_LC }}/governance:${{ github.sha }}
 
       - name: Build and Push director
+        if: ${{ github.event.inputs.skip_build != 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -68,6 +83,7 @@ jobs:
           tags: ${{ env.REPO_LC }}/director:${{ github.sha }}
 
       - name: Build and Push kafka2db
+        if: ${{ github.event.inputs.skip_build != 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -76,6 +92,7 @@ jobs:
           tags: ${{ env.REPO_LC }}/kafka2db:${{ github.sha }}
 
       - name: Build and Push accounting-agent
+        if: ${{ github.event.inputs.skip_build != 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -84,6 +101,7 @@ jobs:
           tags: ${{ env.REPO_LC }}/accounting-agent:${{ github.sha }}
 
       - name: Build and Push general-fast-agent
+        if: ${{ github.event.inputs.skip_build != 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -92,6 +110,7 @@ jobs:
           tags: ${{ env.REPO_LC }}/general-fast-agent:${{ github.sha }}
 
       - name: Build and Push philosopher-agent
+        if: ${{ github.event.inputs.skip_build != 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -100,6 +119,7 @@ jobs:
           tags: ${{ env.REPO_LC }}/philosopher-agent:${{ github.sha }}
 
       - name: Build and Push todo-list-agent
+        if: ${{ github.event.inputs.skip_build != 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -108,6 +128,7 @@ jobs:
           tags: ${{ env.REPO_LC }}/todo-list-agent:${{ github.sha }}
 
       - name: Build and Push api-gateway
+        if: ${{ github.event.inputs.skip_build != 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -116,6 +137,7 @@ jobs:
           tags: ${{ env.REPO_LC }}/api-gateway:${{ github.sha }}
 
       - name: Build and Push dashboard
+        if: ${{ github.event.inputs.skip_build != 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -130,7 +152,7 @@ jobs:
       # ==========================================
       - name: Deploy to Docker Swarm
         env:
-          IMAGE_TAG: ${{ github.sha }}
+          IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
           REPO: ${{ env.REPO_LC }}
         run: |
           # 1. Install envsubst
