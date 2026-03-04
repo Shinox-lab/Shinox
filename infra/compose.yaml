@@ -10,6 +10,8 @@ volumes:
   pgdata: null
   loki: null
   grafana: null
+  certbot_conf: null
+  certbot_www: null
 
 services:
   redpanda-0:
@@ -72,8 +74,6 @@ services:
           adminApi:
             enabled: true
             urls: ["http://redpanda-0:9644"]
-    ports:
-      - 8080:8080
     depends_on:
       - redpanda-0
 
@@ -178,7 +178,7 @@ services:
 
   # Agent Registry - Discovery Service
   agent-registry:
-    image: ${REPO}/agent-registry:${IMAGE_TAG}
+    image: "${REPO}/agent-registry:${IMAGE_TAG}"
     container_name: agent-registry
     hostname: agent-registry
     networks:
@@ -202,7 +202,7 @@ services:
 
   # Squad Lead - A2A Agent Server
   squad-lead-agent:
-    image: ${REPO}/squad-lead-agent:${IMAGE_TAG}
+    image: "${REPO}/squad-lead-agent:${IMAGE_TAG}"
     container_name: squad-lead-agent
     hostname: squad-lead-agent
     networks:
@@ -221,7 +221,7 @@ services:
 
   # Governance Service
   governance:
-    image: ${REPO}/governance:${IMAGE_TAG}
+    image: "${REPO}/governance:${IMAGE_TAG}"
     container_name: governance
     hostname: governance
     networks:
@@ -235,7 +235,7 @@ services:
 
   # Director Service
   director:
-    image: ${REPO}/director:${IMAGE_TAG}
+    image: "${REPO}/director:${IMAGE_TAG}"
     container_name: director
     hostname: director
     networks:
@@ -272,7 +272,7 @@ services:
 
   # Kafka to DB Ingestor
   kafka2db:
-    image: ${REPO}/kafka2db:${IMAGE_TAG}
+    image: "${REPO}/kafka2db:${IMAGE_TAG}"
     container_name: kafka2db
     hostname: kafka2db
     networks:
@@ -291,7 +291,7 @@ services:
       - init-redpanda
 
   accounting-agent:
-    image: ${REPO}/accounting-agent:${IMAGE_TAG}
+    image: "${REPO}/accounting-agent:${IMAGE_TAG}"
     container_name: accounting-agent
     hostname: accounting-agent
     networks:
@@ -307,7 +307,7 @@ services:
       - agent-registry
 
   general-fast-agent:
-    image: ${REPO}/general-fast-agent:${IMAGE_TAG}
+    image: "${REPO}/general-fast-agent:${IMAGE_TAG}"
     container_name: general-fast-agent
     hostname: general-fast-agent
     networks:
@@ -323,7 +323,7 @@ services:
       - agent-registry
 
   philosopher-agent:
-    image: ${REPO}/philosopher-agent:${IMAGE_TAG}
+    image: "${REPO}/philosopher-agent:${IMAGE_TAG}"
     container_name: philosopher-agent
     hostname: philosopher-agent
     networks:
@@ -339,7 +339,7 @@ services:
       - agent-registry
 
   todo-list-agent:
-    image: ${REPO}/todo-list-agent:${IMAGE_TAG}
+    image: "${REPO}/todo-list-agent:${IMAGE_TAG}"
     container_name: todo-list-agent
     hostname: todo-list-agent
     networks:
@@ -361,13 +361,11 @@ services:
   # API GATEWAY (Frontend Backend)
   # ==========================================
   api-gateway:
-    image: ${REPO}/api-gateway:${IMAGE_TAG}
+    image: "${REPO}/api-gateway:${IMAGE_TAG}"
     container_name: api-gateway
     hostname: api-gateway
     networks:
       - shinox_infra
-    ports:
-      - "8002:8002"
     environment:
       - DATABASE_URL=postgresql://admin:adminpassword@postgres-db:5432/shinoxdb
       - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
@@ -386,15 +384,13 @@ services:
   # DASHBOARD (Next.js Frontend)
   # ==========================================
   dashboard:
-    image: ${REPO}/dashboard:${IMAGE_TAG}
+    image: "${REPO}/dashboard:${IMAGE_TAG}"
     container_name: dashboard
     hostname: dashboard
     networks:
       - shinox_infra
-    ports:
-      - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_GATEWAY_URL=http://api-gateway:8002
+      - NEXT_PUBLIC_API_GATEWAY_URL=https://api.aidebate.site
     depends_on:
       - api-gateway
 
@@ -443,9 +439,8 @@ services:
     hostname: grafana
     networks:
       - shinox_infra
-    ports:
-      - "3030:3000"
     environment:
+      - GF_SERVER_ROOT_URL=https://grafana.aidebate.site
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_AUTH_ANONYMOUS_ENABLED=true
@@ -456,3 +451,66 @@ services:
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
     depends_on:
       - loki
+
+  # ==========================================
+  # REVERSE PROXY & TLS
+  # ==========================================
+
+  # Init Certs - Creates dummy self-signed certs so Nginx can start
+  # On subsequent deploys this is a no-op (certs already exist in the volume)
+  init-certs:
+    image: alpine:3.20
+    container_name: init-certs
+    volumes:
+      - certbot_conf:/etc/letsencrypt
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        CERT_DIR=/etc/letsencrypt/live/aidebate.site
+        if [ -f "$$CERT_DIR/fullchain.pem" ]; then
+          echo "Certificates already exist, skipping."
+          exit 0
+        fi
+        echo "Creating dummy self-signed certificate for initial Nginx startup..."
+        apk add --no-cache openssl
+        mkdir -p "$$CERT_DIR"
+        openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
+          -keyout "$$CERT_DIR/privkey.pem" \
+          -out "$$CERT_DIR/fullchain.pem" \
+          -subj '/CN=aidebate.site'
+        echo "Dummy certificate created. Run certbot to obtain real certificates."
+    restart: "no"
+
+  # Nginx - Reverse Proxy with TLS termination
+  nginx:
+    image: "${REPO}/nginx:${IMAGE_TAG}"
+    container_name: nginx
+    hostname: nginx
+    networks:
+      - shinox_infra
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - certbot_conf:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    depends_on:
+      - init-certs
+      - dashboard
+      - api-gateway
+      - grafana
+      - redpanda-console
+    restart: unless-stopped
+
+  # Certbot - Automatic certificate renewal
+  certbot:
+    image: certbot/certbot:latest
+    container_name: certbot
+    networks:
+      - shinox_infra
+    volumes:
+      - certbot_conf:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    # Attempt renewal every 12 hours (certbot is a no-op if not due)
+    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done'

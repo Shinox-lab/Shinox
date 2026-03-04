@@ -1,4 +1,4 @@
--- Active: 1762308987956@@127.0.0.1@5432
+-- Active: 1762308987956@@156.67.27.250@5432@shinoxdb@public
 -- Shinox Agentic Mesh Database Schema
 -- Version: 2.0.0
 -- Description: Core tables for agent coordination, sessions, message persistence,

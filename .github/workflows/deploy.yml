@@ -145,6 +145,15 @@ jobs:
           push: true
           tags: ${{ env.REPO_LC }}/dashboard:${{ github.sha }}
 
+      - name: Build and Push nginx
+        if: ${{ github.event.inputs.skip_build != 'true' }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile.nginx
+          push: true
+          tags: ${{ env.REPO_LC }}/nginx:${{ github.sha }}
+
       # ==========================================
       # DEPLOY TO DOCKER SWARM VIA SSH
       # envsubst injects IMAGE_TAG and REPO into compose.yaml
@@ -177,3 +186,68 @@ jobs:
            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin && \
            docker version --format '{{.Server.Version}}' && \
            docker stack deploy --with-registry-auth -c /tmp/compose.yaml shinox"
+
+      # ==========================================
+      # PROVISION REAL CERTS (first deploy only)
+      # Checks if real LE certs exist; if not, requests them.
+      # On subsequent deploys this is a no-op.
+      # ==========================================
+      - name: Provision Let's Encrypt certificates
+        env:
+          CERTBOT_EMAIL: ${{ secrets.CERTBOT_EMAIL }}
+        run: |
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} bash -s << 'REMOTE_SCRIPT'
+            set -e
+            DOMAINS="dashboard.aidebate.site grafana.aidebate.site console.aidebate.site api.aidebate.site"
+            CERTBOT_EMAIL="${CERTBOT_EMAIL:-admin@aidebate.site}"
+
+            # Wait for nginx to be running
+            echo "Waiting for nginx to start..."
+            for i in $(seq 1 30); do
+              if docker ps --format '{{.Names}}' | grep -q 'shinox_nginx'; then
+                echo "Nginx is running."
+                break
+              fi
+              echo "  attempt $i/30..."
+              sleep 5
+            done
+
+            # Check if real certs already exist (LE certs have a renewal conf)
+            CERT_VOLUME=$(docker volume inspect shinox_certbot_conf --format '{{.Mountpoint}}' 2>/dev/null || true)
+            if [ -n "$CERT_VOLUME" ] && [ -d "$CERT_VOLUME/renewal" ] && [ "$(ls -A $CERT_VOLUME/renewal/ 2>/dev/null)" ]; then
+              echo "Real Let's Encrypt certificates already exist. Skipping provisioning."
+              exit 0
+            fi
+
+            echo "No real certificates found. Requesting from Let's Encrypt..."
+
+            # Build domain args
+            DOMAIN_ARGS=""
+            for d in $DOMAINS; do
+              DOMAIN_ARGS="$DOMAIN_ARGS -d $d"
+            done
+
+            # Run certbot via a one-shot container sharing the same volumes
+            docker run --rm \
+              -v shinox_certbot_conf:/etc/letsencrypt \
+              -v shinox_certbot_www:/var/www/certbot \
+              certbot/certbot:latest certonly \
+                --webroot \
+                --webroot-path=/var/www/certbot \
+                --email "$CERTBOT_EMAIL" \
+                --agree-tos \
+                --no-eff-email \
+                --force-renewal \
+                $DOMAIN_ARGS
+
+            echo "Certificates obtained. Reloading Nginx..."
+
+            # Find the nginx container and reload
+            NGINX_CONTAINER=$(docker ps --format '{{.Names}}' | grep 'shinox_nginx' | head -1)
+            if [ -n "$NGINX_CONTAINER" ]; then
+              docker exec "$NGINX_CONTAINER" nginx -s reload
+              echo "Nginx reloaded with real certificates."
+            fi
+
+            echo "Done! HTTPS is live for: $DOMAINS"
+          REMOTE_SCRIPT
