@@ -165,6 +165,6 @@ jobs:
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
 
           # 3. Inject REPO and IMAGE_TAG into compose.yaml, then deploy via SSH
-          envsubst < infra/compose.yaml | ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+          envsubst '$IMAGE_TAG $REPO' < infra/compose.yaml | ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
           "echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin && \
            docker stack deploy --with-registry-auth -c - shinox"
