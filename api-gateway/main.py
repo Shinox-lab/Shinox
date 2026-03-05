@@ -127,9 +127,10 @@ class SendMessageRequest(BaseModel):
 
 
 class DispatchRequest(BaseModel):
-    event_type: str
+    event_type: str = "TASK"
     source: str
-    payload: dict
+    payload: Optional[dict] = None
+    content: Optional[str] = None
     priority: str = "NORMAL"
 
 
@@ -246,10 +247,19 @@ async def health_check():
 @app.post("/api/dispatch")
 async def dispatch_event(request: DispatchRequest):
     """Forward a dispatch request to the Director service."""
+
+    # Support both formats: {payload: {...}} and {content: "..."}
+    if request.payload is not None:
+        content_str = json.dumps(request.payload)
+    elif request.content is not None:
+        content_str = request.content
+    else:
+        raise HTTPException(status_code=422, detail="Either 'payload' or 'content' must be provided")
+
     director_payload = {
         "source": request.source,
         "sender_id": "human-admin",
-        "content": json.dumps(request.payload) if isinstance(request.payload, dict) else str(request.payload),
+        "content": content_str,
         "metadata": {
             "event_type": request.event_type,
             "priority": request.priority,
