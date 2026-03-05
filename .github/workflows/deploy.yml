@@ -205,6 +205,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
           REPO: ${{ env.REPO_LC }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           # 0. Trim whitespace from IMAGE_TAG
           IMAGE_TAG="$(echo -n "$IMAGE_TAG" | xargs)"
@@ -225,7 +226,7 @@ jobs:
           # 4. Process compose.yaml with envsubst and package with config files
           #    Docker Swarm configs need the referenced files available relative to compose.yaml
           DEPLOY_DIR=$(mktemp -d)
-          envsubst '$IMAGE_TAG $REPO' < infra/compose.yaml > "$DEPLOY_DIR/compose.yaml"
+          envsubst '$IMAGE_TAG $REPO $OPENAI_API_KEY' < infra/compose.yaml > "$DEPLOY_DIR/compose.yaml"
           cp -r infra/monitoring "$DEPLOY_DIR/monitoring"
           cp -r infra/schemas "$DEPLOY_DIR/schemas"
           tar czf /tmp/deploy.tar.gz -C "$DEPLOY_DIR" .
