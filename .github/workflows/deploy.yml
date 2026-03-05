@@ -41,9 +41,15 @@ jobs:
       - name: Set lowercase repo name
         run: echo "REPO_LC=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
+      # Set up Docker Buildx for layer caching support
+      - name: Set up Docker Buildx
+        if: ${{ github.event.inputs.skip_build != 'true' }}
+        uses: docker/setup-buildx-action@v3
+
       # ==========================================
       # BUILD AND PUSH ALL SERVICES
       # Each image is tagged with the Git Commit SHA for traceability
+      # Uses GitHub Actions cache for Docker layers to speed up rebuilds
       # ==========================================
 
       - name: Build and Push agent-registry
@@ -54,6 +60,8 @@ jobs:
           file: infra/Dockerfile.agent-registry
           push: true
           tags: ${{ env.REPO_LC }}/agent-registry:${{ github.sha }}
+          cache-from: type=gha,scope=agent-registry
+          cache-to: type=gha,mode=max,scope=agent-registry
 
       - name: Build and Push squad-lead-agent
         if: ${{ github.event.inputs.skip_build != 'true' }}
@@ -63,6 +71,8 @@ jobs:
           file: infra/Dockerfile.squad-lead-agent
           push: true
           tags: ${{ env.REPO_LC }}/squad-lead-agent:${{ github.sha }}
+          cache-from: type=gha,scope=squad-lead-agent
+          cache-to: type=gha,mode=max,scope=squad-lead-agent
 
       - name: Build and Push governance
         if: ${{ github.event.inputs.skip_build != 'true' }}
@@ -72,6 +82,8 @@ jobs:
           file: infra/Dockerfile.governance
           push: true
           tags: ${{ env.REPO_LC }}/governance:${{ github.sha }}
+          cache-from: type=gha,scope=governance
+          cache-to: type=gha,mode=max,scope=governance
 
       - name: Build and Push director
         if: ${{ github.event.inputs.skip_build != 'true' }}
@@ -81,6 +93,8 @@ jobs:
           file: infra/Dockerfile.director
           push: true
           tags: ${{ env.REPO_LC }}/director:${{ github.sha }}
+          cache-from: type=gha,scope=director
+          cache-to: type=gha,mode=max,scope=director
 
       - name: Build and Push kafka2db
         if: ${{ github.event.inputs.skip_build != 'true' }}
@@ -90,6 +104,8 @@ jobs:
           file: infra/Dockerfile.kafka2db
           push: true
           tags: ${{ env.REPO_LC }}/kafka2db:${{ github.sha }}
+          cache-from: type=gha,scope=kafka2db
+          cache-to: type=gha,mode=max,scope=kafka2db
 
       - name: Build and Push accounting-agent
         if: ${{ github.event.inputs.skip_build != 'true' }}
@@ -99,6 +115,8 @@ jobs:
           file: infra/Dockerfile.accounting-agent
           push: true
           tags: ${{ env.REPO_LC }}/accounting-agent:${{ github.sha }}
+          cache-from: type=gha,scope=accounting-agent
+          cache-to: type=gha,mode=max,scope=accounting-agent
 
       - name: Build and Push general-fast-agent
         if: ${{ github.event.inputs.skip_build != 'true' }}
@@ -108,6 +126,8 @@ jobs:
           file: infra/Dockerfile.general-fast-agent
           push: true
           tags: ${{ env.REPO_LC }}/general-fast-agent:${{ github.sha }}
+          cache-from: type=gha,scope=general-fast-agent
+          cache-to: type=gha,mode=max,scope=general-fast-agent
 
       - name: Build and Push philosopher-agent
         if: ${{ github.event.inputs.skip_build != 'true' }}
@@ -117,6 +137,8 @@ jobs:
           file: infra/Dockerfile.philosopher-agent
           push: true
           tags: ${{ env.REPO_LC }}/philosopher-agent:${{ github.sha }}
+          cache-from: type=gha,scope=philosopher-agent
+          cache-to: type=gha,mode=max,scope=philosopher-agent
 
       - name: Build and Push todo-list-agent
         if: ${{ github.event.inputs.skip_build != 'true' }}
@@ -126,6 +148,8 @@ jobs:
           file: infra/Dockerfile.todo-list-agent
           push: true
           tags: ${{ env.REPO_LC }}/todo-list-agent:${{ github.sha }}
+          cache-from: type=gha,scope=todo-list-agent
+          cache-to: type=gha,mode=max,scope=todo-list-agent
 
       - name: Build and Push api-gateway
         if: ${{ github.event.inputs.skip_build != 'true' }}
@@ -135,6 +159,8 @@ jobs:
           file: infra/Dockerfile.api-gateway
           push: true
           tags: ${{ env.REPO_LC }}/api-gateway:${{ github.sha }}
+          cache-from: type=gha,scope=api-gateway
+          cache-to: type=gha,mode=max,scope=api-gateway
 
       - name: Build and Push dashboard
         if: ${{ github.event.inputs.skip_build != 'true' }}
@@ -144,6 +170,8 @@ jobs:
           file: infra/Dockerfile.dashboard
           push: true
           tags: ${{ env.REPO_LC }}/dashboard:${{ github.sha }}
+          cache-from: type=gha,scope=dashboard
+          cache-to: type=gha,mode=max,scope=dashboard
 
       - name: Build and Push nginx
         if: ${{ github.event.inputs.skip_build != 'true' }}
@@ -153,6 +181,8 @@ jobs:
           file: infra/Dockerfile.nginx
           push: true
           tags: ${{ env.REPO_LC }}/nginx:${{ github.sha }}
+          cache-from: type=gha,scope=nginx
+          cache-to: type=gha,mode=max,scope=nginx
 
       # ==========================================
       # DEPLOY TO DOCKER SWARM VIA SSH
