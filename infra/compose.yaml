@@ -10,6 +10,7 @@ volumes:
   pgdata: null
   loki: null
   grafana: null
+  prometheus: null
   certbot_conf: null
   certbot_www: null
 
@@ -24,6 +25,12 @@ configs:
     file: ./monitoring/grafana/provisioning/dashboards/dashboards.yaml
   grafana_dashboard_overview:
     file: ./monitoring/grafana/dashboards/shinox-overview.json
+  grafana_dashboard_infrastructure:
+    file: ./monitoring/grafana/dashboards/shinox-infrastructure.json
+  grafana_datasource_prometheus:
+    file: ./monitoring/grafana/provisioning/datasources/prometheus.yaml
+  prometheus_config:
+    file: ./monitoring/prometheus.yaml
   schema_agent_message:
     file: ./schemas/agent-message.json
   schema_governance_signal:
@@ -431,7 +438,7 @@ services:
 
   # Loki - Log Aggregation
   loki:
-    image: grafana/loki:3.4.2
+    image: grafana/loki:3.5.11
     container_name: loki
     hostname: loki
     networks:
@@ -452,7 +459,7 @@ services:
 
   # Promtail - Log Collection Agent
   promtail:
-    image: grafana/promtail:3.4.2
+    image: grafana/promtail:3.5.11
     container_name: promtail
     hostname: promtail
     networks:
@@ -467,9 +474,66 @@ services:
     depends_on:
       - loki
 
+  # Prometheus - Metrics Storage
+  prometheus:
+    image: prom/prometheus:v3.10.0
+    container_name: prometheus
+    hostname: prometheus
+    networks:
+      - shinox_infra
+    ports:
+      - "9090:9090"
+    volumes:
+      - prometheus:/prometheus
+    configs:
+      - source: prometheus_config
+        target: /etc/prometheus/prometheus.yml
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Node Exporter - Host Machine Metrics
+  node-exporter:
+    image: prom/node-exporter:v1.10.2
+    container_name: node-exporter
+    hostname: node-exporter
+    networks:
+      - shinox_infra
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - --path.procfs=/host/proc
+      - --path.rootfs=/rootfs
+      - --path.sysfs=/host/sys
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+
+  # cAdvisor - Container Metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.51.0
+    container_name: cadvisor
+    hostname: cadvisor
+    networks:
+      - shinox_infra
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+
   # Grafana - Dashboards & Visualization
   grafana:
-    image: grafana/grafana:11.5.2
+    image: grafana/grafana:12.4.0
     container_name: grafana
     hostname: grafana
     networks:
@@ -485,12 +549,17 @@ services:
     configs:
       - source: grafana_datasource_loki
         target: /etc/grafana/provisioning/datasources/loki.yaml
+      - source: grafana_datasource_prometheus
+        target: /etc/grafana/provisioning/datasources/prometheus.yaml
       - source: grafana_dashboards_provider
         target: /etc/grafana/provisioning/dashboards/dashboards.yaml
       - source: grafana_dashboard_overview
         target: /etc/grafana/dashboards/shinox-overview.json
+      - source: grafana_dashboard_infrastructure
+        target: /etc/grafana/dashboards/shinox-infrastructure.json
     depends_on:
       - loki
+      - prometheus
 
   # ==========================================
   # REVERSE PROXY & TLS
