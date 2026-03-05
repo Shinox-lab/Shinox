@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
+import httpx
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,6 +37,7 @@ logger = logging.getLogger("ApiGateway")
 # Configuration
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://admin:adminpassword@localhost:5432/agentsquaddb")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:19092")
+DIRECTOR_URL = os.getenv("DIRECTOR_URL", "http://director:8000")
 API_PORT = int(os.getenv("API_PORT", "8002"))
 
 
@@ -235,6 +237,44 @@ app.add_middleware(
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "api-gateway"}
+
+
+# ==========================================
+# DISPATCH ENDPOINT (proxy to Director)
+# ==========================================
+
+@app.post("/api/dispatch")
+async def dispatch_event(request: DispatchRequest):
+    """Forward a dispatch request to the Director service."""
+    director_payload = {
+        "source": request.source,
+        "sender_id": "human-admin",
+        "content": json.dumps(request.payload) if isinstance(request.payload, dict) else str(request.payload),
+        "metadata": {
+            "event_type": request.event_type,
+            "priority": request.priority,
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            resp = await client.post(f"{DIRECTOR_URL}/dispatch", json=director_payload)
+            resp.raise_for_status()
+        except httpx.ConnectError:
+            raise HTTPException(status_code=503, detail="Director service unavailable")
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+
+    result = resp.json()
+
+    # Broadcast squad creation event to all WebSocket clients
+    await manager.broadcast_all({
+        "type": "SQUAD_CREATED",
+        "payload": result,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    return result
 
 
 # ==========================================
