@@ -390,7 +390,8 @@ services:
     networks:
       - shinox_infra
     environment:
-      - NEXT_PUBLIC_API_GATEWAY_URL=https://api.aidebate.site
+      - NEXT_PUBLIC_API_URL=https://api.aidebate.site
+      - NEXT_PUBLIC_WS_URL=wss://api.aidebate.site/ws
     depends_on:
       - api-gateway
 
@@ -467,7 +468,7 @@ services:
     command:
       - -c
       - |
-        CERT_DIR=/etc/letsencrypt/live/aidebate.site
+        CERT_DIR=/etc/letsencrypt/live/dashboard.aidebate.site
         if [ -f "$$CERT_DIR/fullchain.pem" ]; then
           echo "Certificates already exist, skipping."
           exit 0
