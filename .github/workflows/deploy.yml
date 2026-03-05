@@ -59,6 +59,7 @@ jobs:
           context: .
           file: infra/Dockerfile.agent-registry
           push: true
+          provenance: false
           tags: ${{ env.REPO_LC }}/agent-registry:${{ github.sha }}
           cache-from: type=gha,scope=agent-registry
           cache-to: type=gha,mode=max,scope=agent-registry
@@ -70,6 +71,7 @@ jobs:
           context: .
           file: infra/Dockerfile.squad-lead-agent
           push: true
+          provenance: false
           tags: ${{ env.REPO_LC }}/squad-lead-agent:${{ github.sha }}
           cache-from: type=gha,scope=squad-lead-agent
           cache-to: type=gha,mode=max,scope=squad-lead-agent
@@ -81,6 +83,7 @@ jobs:
           context: .
           file: infra/Dockerfile.governance
           push: true
+          provenance: false
           tags: ${{ env.REPO_LC }}/governance:${{ github.sha }}
           cache-from: type=gha,scope=governance
           cache-to: type=gha,mode=max,scope=governance
@@ -92,6 +95,7 @@ jobs:
           context: .
           file: infra/Dockerfile.director
           push: true
+          provenance: false
           tags: ${{ env.REPO_LC }}/director:${{ github.sha }}
           cache-from: type=gha,scope=director
           cache-to: type=gha,mode=max,scope=director
@@ -103,6 +107,7 @@ jobs:
           context: .
           file: infra/Dockerfile.kafka2db
           push: true
+          provenance: false
           tags: ${{ env.REPO_LC }}/kafka2db:${{ github.sha }}
           cache-from: type=gha,scope=kafka2db
           cache-to: type=gha,mode=max,scope=kafka2db
@@ -114,6 +119,7 @@ jobs:
           context: .
           file: infra/Dockerfile.accounting-agent
           push: true
+          provenance: false
           tags: ${{ env.REPO_LC }}/accounting-agent:${{ github.sha }}
           cache-from: type=gha,scope=accounting-agent
           cache-to: type=gha,mode=max,scope=accounting-agent
@@ -125,6 +131,7 @@ jobs:
           context: .
           file: infra/Dockerfile.general-fast-agent
           push: true
+          provenance: false
           tags: ${{ env.REPO_LC }}/general-fast-agent:${{ github.sha }}
           cache-from: type=gha,scope=general-fast-agent
           cache-to: type=gha,mode=max,scope=general-fast-agent
@@ -136,6 +143,7 @@ jobs:
           context: .
           file: infra/Dockerfile.philosopher-agent
           push: true
+          provenance: false
           tags: ${{ env.REPO_LC }}/philosopher-agent:${{ github.sha }}
           cache-from: type=gha,scope=philosopher-agent
           cache-to: type=gha,mode=max,scope=philosopher-agent
@@ -147,6 +155,7 @@ jobs:
           context: .
           file: infra/Dockerfile.todo-list-agent
           push: true
+          provenance: false
           tags: ${{ env.REPO_LC }}/todo-list-agent:${{ github.sha }}
           cache-from: type=gha,scope=todo-list-agent
           cache-to: type=gha,mode=max,scope=todo-list-agent
@@ -158,6 +167,7 @@ jobs:
           context: .
           file: infra/Dockerfile.api-gateway
           push: true
+          provenance: false
           tags: ${{ env.REPO_LC }}/api-gateway:${{ github.sha }}
           cache-from: type=gha,scope=api-gateway
           cache-to: type=gha,mode=max,scope=api-gateway
@@ -169,6 +179,7 @@ jobs:
           context: .
           file: infra/Dockerfile.dashboard
           push: true
+          provenance: false
           tags: ${{ env.REPO_LC }}/dashboard:${{ github.sha }}
           cache-from: type=gha,scope=dashboard
           cache-to: type=gha,mode=max,scope=dashboard
@@ -180,6 +191,7 @@ jobs:
           context: .
           file: infra/Dockerfile.nginx
           push: true
+          provenance: false
           tags: ${{ env.REPO_LC }}/nginx:${{ github.sha }}
           cache-from: type=gha,scope=nginx
           cache-to: type=gha,mode=max,scope=nginx
