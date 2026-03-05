@@ -495,12 +495,6 @@ services:
     volumes:
       - certbot_conf:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro
-    depends_on:
-      - init-certs
-      - dashboard
-      - api-gateway
-      - grafana
-      - redpanda-console
     restart: unless-stopped
 
   # Certbot - Automatic certificate renewal
