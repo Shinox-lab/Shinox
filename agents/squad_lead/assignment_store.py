@@ -179,7 +179,7 @@ class AssignmentStore:
             """
             SELECT id, agent_id, title, status
               FROM hitl_requests
-             WHERE conversation_id = $1
+             WHERE group_chat_name = $1
                AND status = 'PENDING'
             """,
             conversation_id,
@@ -213,7 +213,7 @@ class AssignmentStore:
         """Return HITL requests that have passed their expiry deadline."""
         rows = await self._pool.fetch(
             """
-            SELECT id, conversation_id, agent_id, title, status, expires_at
+            SELECT id, group_chat_name AS conversation_id, agent_id, title, status, expires_at
               FROM hitl_requests
              WHERE status = 'PENDING'
                AND expires_at IS NOT NULL
