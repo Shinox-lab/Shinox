@@ -369,6 +369,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://admin:adminpassword@postgres-db:5432/shinoxdb
       - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
+      - DIRECTOR_URL=http://director:8000
       - API_PORT=8002
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
@@ -379,6 +380,7 @@ services:
       - postgres-db
       - redpanda-0
       - init-redpanda
+      - director
 
   # ==========================================
   # DASHBOARD (Next.js Frontend)

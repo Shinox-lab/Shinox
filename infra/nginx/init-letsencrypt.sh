@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-DOMAINS=(dashboard.aidebate.site grafana.aidebate.site console.aidebate.site api.aidebate.site)
+DOMAINS=(dashboard.aidebate.site grafana.aidebate.site console.aidebate.site api.aidebate.site registry.aidebate.site)
 EMAIL="${CERTBOT_EMAIL:-admin@aidebate.site}"
 CERT_PATH="./certbot/conf"
 WEBROOT_PATH="./certbot/www"
