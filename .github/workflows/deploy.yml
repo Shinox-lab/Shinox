@@ -210,12 +210,24 @@ jobs:
           # 3. Debug: verify variables
           echo "IMAGE_TAG=[$IMAGE_TAG] REPO=[$REPO]"
 
-          # 4. Inject REPO and IMAGE_TAG into compose.yaml, then deploy via SSH
-          envsubst '$IMAGE_TAG $REPO' < infra/compose.yaml | ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
-          "cat > /tmp/compose.yaml && \
-           echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin && \
-           docker version --format '{{.Server.Version}}' && \
-           docker stack deploy --with-registry-auth -c /tmp/compose.yaml shinox"
+          # 4. Process compose.yaml with envsubst and package with config files
+          #    Docker Swarm configs need the referenced files available relative to compose.yaml
+          DEPLOY_DIR=$(mktemp -d)
+          envsubst '$IMAGE_TAG $REPO' < infra/compose.yaml > "$DEPLOY_DIR/compose.yaml"
+          cp -r infra/monitoring "$DEPLOY_DIR/monitoring"
+          cp -r infra/schemas "$DEPLOY_DIR/schemas"
+          tar czf /tmp/deploy.tar.gz -C "$DEPLOY_DIR" .
+
+          # 5. Send deployment package and deploy via SSH
+          scp /tmp/deploy.tar.gz ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/deploy.tar.gz
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "\
+            mkdir -p /tmp/shinox-deploy && \
+            tar xzf /tmp/deploy.tar.gz -C /tmp/shinox-deploy && \
+            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin && \
+            docker version --format '{{.Server.Version}}' && \
+            cd /tmp/shinox-deploy && \
+            docker stack deploy --with-registry-auth -c compose.yaml shinox && \
+            rm -rf /tmp/shinox-deploy /tmp/deploy.tar.gz"
 
       # ==========================================
       # PROVISION REAL CERTS (first deploy only)

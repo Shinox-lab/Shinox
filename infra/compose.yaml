@@ -13,6 +13,22 @@ volumes:
   certbot_conf: null
   certbot_www: null
 
+configs:
+  loki_config:
+    file: ./monitoring/loki-config.yaml
+  promtail_config:
+    file: ./monitoring/promtail-config.yaml
+  grafana_datasource_loki:
+    file: ./monitoring/grafana/provisioning/datasources/loki.yaml
+  grafana_dashboards_provider:
+    file: ./monitoring/grafana/provisioning/dashboards/dashboards.yaml
+  grafana_dashboard_overview:
+    file: ./monitoring/grafana/dashboards/shinox-overview.json
+  schema_agent_message:
+    file: ./schemas/agent-message.json
+  schema_governance_signal:
+    file: ./schemas/governance-signal.json
+
 services:
   redpanda-0:
     container_name: redpanda-0
@@ -83,16 +99,37 @@ services:
   # ==========================================
   init-redpanda:
     image: redpandadata/redpanda:v25.3.4
-    network_mode: "service:redpanda-0"
+    networks:
+      - shinox_infra
+    configs:
+      - source: schema_agent_message
+        target: /tmp/schemas/agent-message.json
+      - source: schema_governance_signal
+        target: /tmp/schemas/governance-signal.json
     depends_on:
       - redpanda-0
-    restart: "no"
-    volumes:
-      - ./schemas:/tmp/schemas
+    deploy:
+      restart_policy:
+        condition: none
     entrypoint: /bin/sh
     command:
       - -c
       - |
+        # Configure rpk to connect to redpanda-0 over the overlay network
+        cat > /tmp/rpk-profile.yaml <<'RPKCFG'
+        rpk:
+          kafka_api:
+            brokers:
+              - redpanda-0:9092
+          admin_api:
+            addresses:
+              - redpanda-0:9644
+          schema_registry:
+            addresses:
+              - http://redpanda-0:8081
+        RPKCFG
+        export REDPANDA_CONFIG_FILE=/tmp/rpk-profile.yaml
+
         echo 'Waiting for Redpanda to be ready...'
         until rpk cluster health | grep -E 'Healthy:.+true'; do
           echo 'Redpanda is not ready yet. Retrying in 5 seconds...'
@@ -103,16 +140,16 @@ services:
         # 1. TOPIC CREATION
         # ---------------------------------------------------------
         echo 'Creating Topics...'
-        
+
         # Governance Buffer (Short retention)
         rpk topic create mesh.responses.pending -c cleanup.policy=delete -c retention.ms=3600000 || true
-        
+
         # Global Event Stream (Compact - Vital for Replay)
         rpk topic create mesh.global.events -c cleanup.policy=compact || true
-        
+
         # Signals (Kill Switch)
         rpk topic create sys.governance.signals -c cleanup.policy=delete -c retention.ms=600000 || true
-        
+
         # Audit & HITL (Permanent)
         rpk topic create sys.governance.alerts -c cleanup.policy=delete -c retention.ms=-1 || true
 
@@ -121,38 +158,29 @@ services:
         rpk topic create sys.rag.ingest -c cleanup.policy=delete -c retention.ms=604800000 || true
         rpk topic create sys.approvals.request -c cleanup.policy=delete -c retention.ms=-1 || true
         rpk topic create sys.approvals.response -c cleanup.policy=delete -c retention.ms=-1 || true
-        # rpk topic create session.{uuid} -c cleanup.policy=delete -c retention.ms=-1 || true
-        # rpk topic create mesh.agent.{id}.inbox -c cleanup.policy=delete -c retention.ms=3600000 || true
 
         echo 'Topics created successfully.'
         echo 'Current topics:'
-        rpk topic list        
+        rpk topic list
 
         # ---------------------------------------------------------
         # 2. CONSUMER GROUP PRE-CREATION
-        # We use 'group seek' to initialize the group and set 
+        # We use 'group seek' to initialize the group and set
         # its pointer to the START of the topic.
         # ---------------------------------------------------------
         echo 'Pre-warming Consumer Groups...'
 
         # A. Governance Service
-        # Must see all pending messages from the start to avoid missing a draft.
         rpk group seek svc-governance-validator --to start --topics mesh.responses.pending --allow-new-topics
 
         # B. Planner Agent
-        # Must read the full Global Event history to build context.
         rpk group seek agent-planner-core --to start --topics mesh.global.events --allow-new-topics
 
         # C. RAG Indexer
-        # Should process all queued documents, even old ones.
         rpk group seek svc-rag-indexer --to start --topics sys.rag.ingest --allow-new-topics
 
         # D. HITL Dashboard
-        # Must see all pending approval requests.
         rpk group seek svc-hitl-dashboard --to start --topics sys.approvals.request --allow-new-topics
-
-        # Note: We do NOT pre-create 'agent-worker-{id}' groups 
-        # because those IDs are dynamic (UUIDs) and generated at runtime.
 
         echo 'Consumer Groups pre-warmed successfully.'
         echo 'Current Consumer Groups:'
@@ -162,7 +190,7 @@ services:
         # 3. SCHEMA REGISTRATION
         # ---------------------------------------------------------
         echo 'Registering Schemas...'
-        
+
         rpk registry schema create agent-message --schema /tmp/schemas/agent-message.json --format json || true
         rpk registry schema create governance-signal --schema /tmp/schemas/governance-signal.json --format json || true
 
@@ -412,7 +440,9 @@ services:
       - "3100:3100"
     volumes:
       - loki:/loki
-      - ./monitoring/loki-config.yaml:/etc/loki/local-config.yaml
+    configs:
+      - source: loki_config
+        target: /etc/loki/local-config.yaml
     command: -config.file=/etc/loki/local-config.yaml
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1"]
@@ -430,7 +460,9 @@ services:
     volumes:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./monitoring/promtail-config.yaml:/etc/promtail/config.yaml
+    configs:
+      - source: promtail_config
+        target: /etc/promtail/config.yaml
     command: -config.file=/etc/promtail/config.yaml
     depends_on:
       - loki
@@ -450,8 +482,13 @@ services:
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
     volumes:
       - grafana:/var/lib/grafana
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    configs:
+      - source: grafana_datasource_loki
+        target: /etc/grafana/provisioning/datasources/loki.yaml
+      - source: grafana_dashboards_provider
+        target: /etc/grafana/provisioning/dashboards/dashboards.yaml
+      - source: grafana_dashboard_overview
+        target: /etc/grafana/dashboards/shinox-overview.json
     depends_on:
       - loki
 
@@ -466,6 +503,9 @@ services:
     container_name: init-certs
     volumes:
       - certbot_conf:/etc/letsencrypt
+    deploy:
+      restart_policy:
+        condition: none
     entrypoint: /bin/sh
     command:
       - -c
@@ -483,7 +523,6 @@ services:
           -out "$$CERT_DIR/fullchain.pem" \
           -subj '/CN=aidebate.site'
         echo "Dummy certificate created. Run certbot to obtain real certificates."
-    restart: "no"
 
   # Nginx - Reverse Proxy with TLS termination
   nginx:
