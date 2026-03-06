@@ -13,7 +13,10 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 # 3. Copy dependency files first (for caching)
 COPY agents/philosopher/pyproject.toml agents/philosopher/uv.lock ./
 
-# 4. Install dependencies only (better layer caching)
+# 4. Upgrade shinox-agent-sdk to latest before installing
+RUN uv lock --upgrade-package shinox-agent-sdk
+
+# 5. Install dependencies only (better layer caching)
 RUN uv sync --no-dev --no-install-project
 
 # 5. Copy all application code (preserving structure)

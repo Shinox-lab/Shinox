@@ -29,6 +29,7 @@ WORKDIR /app
 
 # Install Python dependencies (cached unless pyproject.toml/uv.lock change)
 COPY agents/todo_list/pyproject.toml agents/todo_list/uv.lock ./
+RUN uv lock --upgrade-package shinox-agent-sdk
 RUN uv sync --no-dev --no-install-project
 
 # Copy application code
