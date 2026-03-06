@@ -29,7 +29,6 @@ WORKDIR /app
 
 # Install Python dependencies (cached unless pyproject.toml/uv.lock change)
 COPY agents/todo_list/pyproject.toml agents/todo_list/uv.lock ./
-RUN uv lock --upgrade-package shinox-agent-sdk
 RUN uv sync --no-dev --no-install-project
 
 # Copy application code
@@ -37,8 +36,8 @@ COPY agents/todo_list/*.py agents/todo_list/start.sh* ./
 COPY agents/todo_list/mcp_tool/client/ ./mcp_tool/client/
 COPY agents/todo_list/pyproject.toml agents/todo_list/uv.lock ./
 
-# Install the project itself
-RUN uv sync --no-dev
+# Upgrade shinox-agent-sdk to latest and install the project
+RUN uv lock --upgrade-package shinox-agent-sdk && uv sync --no-dev
 
 # Copy pre-built MCP server from stage 1 (no make/g++/npm needed here)
 COPY --from=mcp-builder /build/dist/ /app/mcp_server/dist/
