@@ -15,8 +15,11 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY dashboard/ ./
 
 ENV NEXT_TELEMETRY_DISABLED=1
-ENV NEXT_PUBLIC_API_URL=https://api.aidebate.site
-ENV NEXT_PUBLIC_WS_URL=wss://api.aidebate.site/ws
+
+ARG NEXT_PUBLIC_API_URL=https://api.aidebate.site
+ARG NEXT_PUBLIC_WS_URL=wss://api.aidebate.site/ws
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}
 
 RUN yarn build
 
