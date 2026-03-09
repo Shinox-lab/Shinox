@@ -6,6 +6,7 @@ from typing import Annotated, Any, Callable, List, TypedDict, Dict, Literal, Opt
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import SystemMessage, BaseMessage
+from langchain_core.runnables import RunnableConfig
 # from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
@@ -360,7 +361,9 @@ def node_updater(state: SquadState):
         # or if we can't tell, take the first assigned task
         failed_task = None
         for task in agent_tasks:
-            task_instruction = task.split(":", 1)[1].strip() if ":" in task else task
+            # Strip [needs: ...] annotation before extracting instruction
+            clean = re.sub(r'\[needs:[^\]]*\]', '', task)
+            task_instruction = clean.split(":", 1)[1].strip() if ":" in clean else task
             # Check if the original task instruction is referenced in the response
             if task_instruction.lower()[:40] in result_content.lower():
                 failed_task = task
@@ -391,8 +394,9 @@ def node_updater(state: SquadState):
                 fallback_agent = candidates[0]
 
             if fallback_agent:
-                # Extract instruction from original task
-                instruction = failed_task.split(":", 1)[1].strip() if ":" in failed_task else failed_task
+                # Extract instruction from original task (strip [needs: ...] first)
+                clean_failed = re.sub(r'\[needs:[^\]]*\]', '', failed_task)
+                instruction = clean_failed.split(":", 1)[1].strip() if ":" in clean_failed else failed_task
                 new_task = f"{fallback_agent}: {instruction}"
 
                 # Rebuild the current stage: remove only the failed task, add the re-delegated one
@@ -442,12 +446,16 @@ def node_updater(state: SquadState):
     if plan:
         current_stage = plan[0]
         # Remove one task for this agent from the stage
+        # Tasks may contain [needs: ...] annotations between agent-id and ":"
+        # e.g. "agent-id [needs: dep-1]: instruction"
         removed = False
         new_stage = []
         for t in current_stage:
-            if not removed and t.startswith(f"{source_agent}:"):
-                removed = True  # Remove only the first matching task
-                continue
+            if not removed:
+                task_agent = t.split("[")[0].split(":")[0].strip()
+                if task_agent == source_agent:
+                    removed = True
+                    continue
             new_stage.append(t)
 
         if not new_stage:
@@ -464,7 +472,7 @@ def node_updater(state: SquadState):
 
 # --- 4b. Session Continuity Check ---
 
-async def node_continuity_check(state: SquadState, config: dict):
+async def node_continuity_check(state: SquadState, config: RunnableConfig):
     """Deterministic gate that queries the DB for pending blockers before
     allowing the session to finalize as DONE.  No LLM call — pure DB query.
 
