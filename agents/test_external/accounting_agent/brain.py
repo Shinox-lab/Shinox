@@ -22,7 +22,7 @@ memory = MemorySaver()
 
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL_NAME = "nvidia/nemotron-3-nano-30b-a3b:free"  # Use a smart model for orchestration
+OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "nvidia/nemotron-3-nano-30b-a3b:free")
 
 llm = ChatOpenAI(
     model=OPENAI_MODEL_NAME,

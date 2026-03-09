@@ -248,6 +248,7 @@ services:
       - AGENT_REGISTRY_URL=http://agent-registry:9000
       - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME:-nvidia/nemotron-3-nano-30b-a3b:free}
       - DATABASE_URL=postgresql://admin:adminpassword@postgres-db:5432/shinoxdb
       - LOG_LEVEL=INFO
     depends_on:
@@ -337,6 +338,7 @@ services:
       - AGENT_REGISTRY_URL=http://agent-registry:9000
       - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME:-nvidia/nemotron-3-nano-30b-a3b:free}
       - LOG_LEVEL=INFO
     depends_on:
       - agent-registry
@@ -353,6 +355,7 @@ services:
       - AGENT_REGISTRY_URL=http://agent-registry:9000
       - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME:-nvidia/nemotron-3-nano-30b-a3b:free}
       - LOG_LEVEL=INFO
     depends_on:
       - agent-registry
@@ -369,6 +372,7 @@ services:
       - AGENT_REGISTRY_URL=http://agent-registry:9000
       - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME:-nvidia/nemotron-3-nano-30b-a3b:free}
       - LOG_LEVEL=INFO
     depends_on:
       - agent-registry
@@ -387,6 +391,7 @@ services:
       - AGENT_REGISTRY_URL=http://agent-registry:9000
       - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME:-nvidia/nemotron-3-nano-30b-a3b:free}
       - MCP_SERVER_PATH=/app/mcp_server/dist/index.js
       - LOG_LEVEL=INFO
     depends_on:
