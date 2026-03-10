@@ -112,17 +112,17 @@ jobs:
           cache-from: type=gha,scope=kafka2db
           cache-to: type=gha,mode=max,scope=kafka2db
 
-      - name: Build and Push accounting-agent
-        if: ${{ github.event.inputs.skip_build != 'true' }}
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: infra/Dockerfile.accounting-agent
-          push: true
-          provenance: false
-          tags: ${{ env.REPO_LC }}/accounting-agent:${{ github.sha }}
-          cache-from: type=gha,scope=accounting-agent
-          cache-to: type=gha,mode=max,scope=accounting-agent
+      # - name: Build and Push accounting-agent
+      #   if: ${{ github.event.inputs.skip_build != 'true' }}
+      #   uses: docker/build-push-action@v5
+      #   with:
+      #     context: .
+      #     file: infra/Dockerfile.accounting-agent
+      #     push: true
+      #     provenance: false
+      #     tags: ${{ env.REPO_LC }}/accounting-agent:${{ github.sha }}
+      #     cache-from: type=gha,scope=accounting-agent
+      #     cache-to: type=gha,mode=max,scope=accounting-agent
 
       - name: Build and Push general-fast-agent
         if: ${{ github.event.inputs.skip_build != 'true' }}
