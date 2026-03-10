@@ -280,6 +280,7 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - AGENT_REGISTRY_URL=http://agent-registry:9000
+      - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME:-nvidia/nemotron-3-nano-30b-a3b:free}
       - LOG_LEVEL=INFO
     ports:
       - "8000:8000"

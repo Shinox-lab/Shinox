@@ -444,11 +444,32 @@ async def _task_timeout_monitor(agent_instance: ShinoxAgent):
             if not _assignment_store:
                 continue
 
+            # Guard: skip entirely if no active sessions
+            if not agent_instance.active_sessions:
+                logger.debug(f"[{agent_instance.agent_id}] Timeout monitor: no active sessions, skipping cycle")
+                continue
+
+            logger.debug(
+                f"[{agent_instance.agent_id}] Timeout monitor cycle: "
+                f"{len(agent_instance.active_sessions)} active session(s)"
+            )
+
             # First timeout: assignments that haven't been checked yet
             first_check = await _assignment_store.get_timed_out_first_check(TASK_TIMEOUT_SECONDS)
             for row in first_check:
                 agent_id = row["agent_id"]
                 conversation_id = row["conversation_id"]
+
+                # Guard: skip if this conversation's session is no longer active
+                if conversation_id not in agent_instance.active_sessions:
+                    logger.info(
+                        f"[{agent_instance.agent_id}] Timeout monitor: skipping stale check-in "
+                        f"for {agent_id} — session {conversation_id} is no longer active. "
+                        f"Cleaning up assignment."
+                    )
+                    await _assignment_store.remove_assignment(conversation_id, agent_id)
+                    continue
+
                 logger.info(
                     f"[{agent_instance.agent_id}] Task timeout for {agent_id} "
                     f"in conversation {conversation_id}. Sending check-in."
@@ -484,6 +505,17 @@ async def _task_timeout_monitor(agent_instance: ShinoxAgent):
                 agent_id = row["agent_id"]
                 conversation_id = row["conversation_id"]
                 instruction = row["instruction"]
+
+                # Guard: skip if session is no longer active
+                if conversation_id not in agent_instance.active_sessions:
+                    logger.info(
+                        f"[{agent_instance.agent_id}] Timeout monitor: skipping re-delegation "
+                        f"for {agent_id} — session {conversation_id} is no longer active. "
+                        f"Cleaning up assignment."
+                    )
+                    await _assignment_store.remove_assignment(conversation_id, agent_id)
+                    continue
+
                 logger.warning(
                     f"[{agent_instance.agent_id}] Agent {agent_id} unresponsive "
                     f"in conversation {conversation_id}. Triggering re-delegation."
@@ -501,6 +533,10 @@ async def _task_timeout_monitor(agent_instance: ShinoxAgent):
                         "messages": [timeout_msg],
                         "squad_status": "UPDATING",
                     }
+                    logger.info(
+                        f"[{agent_instance.agent_id}] Timeout monitor: invoking LLM for re-delegation "
+                        f"(agent={agent_id}, session={conversation_id})"
+                    )
                     final_state = await brain_module.brain.ainvoke(state_input, config=config)
 
                     synthetic_headers = A2AHeaders(
@@ -522,6 +558,15 @@ async def _task_timeout_monitor(agent_instance: ShinoxAgent):
                 conversation_id = row["conversation_id"]
                 agent_id = row.get("agent_id", "unknown")
                 title = row.get("title", "HITL request")
+
+                # Guard: skip if session is no longer active
+                if conversation_id not in agent_instance.active_sessions:
+                    logger.info(
+                        f"[{agent_instance.agent_id}] Timeout monitor: skipping expired HITL "
+                        f"{hitl_id} — session {conversation_id} is no longer active."
+                    )
+                    continue
+
                 logger.warning(
                     f"[{agent_instance.agent_id}] HITL request {hitl_id} expired "
                     f"in conversation {conversation_id}. Synthesizing update."
@@ -541,6 +586,10 @@ async def _task_timeout_monitor(agent_instance: ShinoxAgent):
                         "messages": [expired_msg],
                         "squad_status": "UPDATING",
                     }
+                    logger.info(
+                        f"[{agent_instance.agent_id}] Timeout monitor: invoking LLM for expired HITL "
+                        f"(hitl_id={hitl_id}, session={conversation_id})"
+                    )
                     final_state = await brain_module.brain.ainvoke(state_input, config=config)
 
                     synthetic_headers = A2AHeaders(

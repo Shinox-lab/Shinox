@@ -21,7 +21,7 @@ REDPANDA_BROKERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:19092")
 AGENT_REGISTRY_URL = os.getenv("AGENT_REGISTRY_URL", "http://agent-registry:9000")
 OPENAI_BASE_URL = 'https://openrouter.ai/api/v1'
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL_NAME = "nvidia/nemotron-3-nano-30b-a3b:free"  # Use a smart model for orchestration
+OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "nvidia/nemotron-3-nano-30b-a3b:free")
 
 # --- STRUCTURED JSON LOGGING ---
 import sys

@@ -5,7 +5,7 @@ import re
 from typing import Annotated, Any, Callable, List, TypedDict, Dict, Literal, Optional
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import SystemMessage, BaseMessage
+from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage
 from langchain_core.runnables import RunnableConfig
 # from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
@@ -40,6 +40,11 @@ llm = ChatOpenAI(
     model=OPENAI_MODEL_NAME,
     base_url=OPENAI_BASE_URL,
     api_key=OPENAI_API_KEY,
+    extra_body={
+        "provider": {
+            "only": ["alibaba"],  
+        }
+    }
 )
 
 # --- 3. The Nodes ---
@@ -76,8 +81,7 @@ def node_planner(state: SquadState):
     """
     The Strategic Thinker. Looks at history and generates/updates the DAG.
     """
-    prompt = f"""
-    You are the Squad Lead — a strategic COORDINATOR agent responsible for breaking complex user requests into executable plans.
+    system_prompt = f"""You are the Squad Lead — a strategic COORDINATOR agent responsible for breaking complex user requests into executable plans.
 
     YOUR ROLE: Decompose tasks and delegate them to specialist worker agents. You NEVER perform tasks yourself.
 
@@ -85,8 +89,7 @@ def node_planner(state: SquadState):
     {chr(10).join('- ' + a for a in state['available_squad_agents'])}
 
     CURRENT PLAN: {state.get('plan', [])}
-    LATEST REQUEST: {state['messages'][-1].content}
-    
+
     PLANNING RULES:
     1. You are ONLY a coordinator — NEVER assign tasks to yourself (squad-lead-agent).
     2. Delegate ALL work to the available worker agents listed above.
@@ -127,10 +130,11 @@ def node_planner(state: SquadState):
         NEEDS_AUGMENTATION
         missing: general-purpose agent for formatting and presenting results to end users
 
-    TONE: Decisive, efficient, and precise. You are a mission planner, not a conversationalist.
-    """
+    TONE: Decisive, efficient, and precise. You are a mission planner, not a conversationalist."""
 
-    response = llm.invoke([SystemMessage(content=prompt)])
+    user_prompt = f"Create an execution plan for the following request:\n\n{state['messages'][-1].content}"
+
+    response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
 
     response_text = response.content.strip()
 
