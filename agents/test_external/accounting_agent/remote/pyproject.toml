@@ -1,0 +1,14 @@
+[project]
+name = "remote"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "a2a-sdk[http-server]>=0.3.24",
+    "click>=8.3.1",
+    "dotenv>=0.9.9",
+    "langchain-openai>=1.1.10",
+    "langgraph>=1.0.10",
+    "uvicorn>=0.41.0",
+]
