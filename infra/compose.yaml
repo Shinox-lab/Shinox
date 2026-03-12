@@ -232,6 +232,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        order: stop-first
     depends_on:
       - redpanda-0
 
@@ -251,6 +259,19 @@ services:
       - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME:-nvidia/nemotron-3-nano-30b-a3b:free}
       - DATABASE_URL=postgresql://admin:adminpassword@postgres-db:5432/shinoxdb
       - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        order: stop-first
     depends_on:
       - agent-registry
       - postgres-db
@@ -265,6 +286,14 @@ services:
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=redpanda-0:9092
       - LOG_LEVEL=INFO
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        order: stop-first
     depends_on:
       - redpanda-0
       - init-redpanda
@@ -284,6 +313,19 @@ services:
       - LOG_LEVEL=INFO
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        order: stop-first
     depends_on:
       - governance
       - redpanda-0
@@ -322,6 +364,14 @@ services:
       - POSTGRES_DB=shinoxdb
       - POSTGRES_USER=admin
       - POSTGRES_PASSWORD=adminpassword
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        order: stop-first
     depends_on:
       - postgres-db
       - redpanda-0
@@ -358,6 +408,19 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME:-nvidia/nemotron-3-nano-30b-a3b:free}
       - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        order: stop-first
     depends_on:
       - agent-registry
 
@@ -375,6 +438,19 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME:-nvidia/nemotron-3-nano-30b-a3b:free}
       - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        order: stop-first
     depends_on:
       - agent-registry
 
@@ -395,6 +471,19 @@ services:
       - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME:-nvidia/nemotron-3-nano-30b-a3b:free}
       - MCP_SERVER_PATH=/app/mcp_server/dist/index.js
       - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        order: stop-first
     depends_on:
       - agent-registry
 
@@ -417,6 +506,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        order: stop-first
     depends_on:
       - postgres-db
       - redpanda-0
@@ -435,6 +532,19 @@ services:
     environment:
       - NEXT_PUBLIC_API_URL=https://api.aidebate.site
       - NEXT_PUBLIC_WS_URL=wss://api.aidebate.site/ws
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        order: stop-first
     depends_on:
       - api-gateway
 
@@ -612,7 +722,19 @@ services:
     volumes:
       - certbot_conf:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro
-    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        order: stop-first
 
   # Certbot - Automatic certificate renewal
   certbot:
